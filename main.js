@@ -168,7 +168,7 @@ const api = {
   },
   plans: () => db.prepare('SELECT * FROM plans ORDER BY jours').all(),
   savePlan(p) {
-    if (!p.nom || p.jours < 1 || p.prix < 0) throw new Error('Abonnement invalide');
+    if (!p.nom || p.jours < 1 || p.prix < 0) throw new Error('Formule invalide');
     const cap = p.seances_sem == null || p.seances_sem === '' ? null : Number(p.seances_sem); // max days per week, null = unlimited
     if (cap !== null && !(Number.isInteger(cap) && cap >= 1 && cap <= 7)) throw new Error('Séances par semaine : un nombre de 1 à 7');
     if (p.id) db.prepare('UPDATE plans SET nom=?, jours=?, prix=?, seances_sem=? WHERE id=?').run(p.nom, p.jours, p.prix, cap, p.id);
@@ -268,7 +268,7 @@ const api = {
   },
   deletePlan(id) {
     const n = db.prepare('SELECT (SELECT COUNT(*) FROM members WHERE plan_id=?) + (SELECT COUNT(*) FROM payments WHERE plan_id=?) c').get(id, id).c;
-    if (n) throw new Error('Abonnement utilisé par des membres ou des paiements');
+    if (n) throw new Error('Formule utilisée par des membres ou des paiements');
     db.prepare('DELETE FROM plans WHERE id=?').run(id);
   },
   async importModel() {
@@ -277,13 +277,13 @@ const api = {
     const plans = api.plans();
     fs.writeFileSync(r.filePath, xlsx.write([
       { name: 'Membres', widths: [28, 18, 22, 14, 36], textCols: [0, 1, 2, 3, 4], rows: [
-        ['nom', 'tel', 'abonnement', 'fin', 'notes'],
+        ['nom', 'tel', 'formule', 'fin', 'notes'],
         ['Ahmed Benali', '0555 12 34 56', plans[0]?.nom ?? '', '31/12/2026', 'exemple (supprimer cette ligne)']] },
-      { name: 'Abonnements', widths: [28, 10, 12], rows: [['abonnement', 'jours', 'prix (DA)'], ...plans.map((p) => [p.nom, p.jours, p.prix])] },
+      { name: 'Formules', widths: [28, 10, 12], rows: [['formule', 'jours', 'prix (DA)'], ...plans.map((p) => [p.nom, p.jours, p.prix])] },
     ]));
     return true;
   },
-  // columns: nom, tel, abonnement (plan name), fin (JJ/MM/AAAA), notes. First tab of .xlsx, or a .csv. No payment is created: this loads existing members.
+  // columns: nom, tel, formule (plan name), fin (JJ/MM/AAAA), notes. First tab of .xlsx, or a .csv. No payment is created: this loads existing members.
   async importMembers() {
     const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Excel et CSV', extensions: ['xlsx', 'csv'] }, { name: 'Excel (.xlsx)', extensions: ['xlsx'] }, { name: 'CSV (.csv)', extensions: ['csv'] }, { name: 'Tous les fichiers', extensions: ['*'] }] });
     if (r.canceled) return null;
@@ -300,7 +300,7 @@ const api = {
       const err = (m) => res.erreurs.push(`Ligne ${i + 2} : ${m}`);
       if (!nom) return err('nom manquant');
       const plan = ab && plans.find((p) => p.nom.toLowerCase() === ab.toLowerCase());
-      if (ab && !plan) return err(`abonnement "${ab}" inconnu`);
+      if (ab && !plan) return err(`formule "${ab}" inconnue`);
       let f = null;
       if (fin) {
         const m = fin.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/), n = fin.match(/^\d{4}-\d{2}-\d{2}$/);

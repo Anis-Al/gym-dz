@@ -43,6 +43,8 @@ h2 { font-weight: 500; font-size: 24px; line-height: 1.2; margin: 40px 0 16px; }
 .btn.alt:hover { background: var(--hairline-soft); }
 .btn.sm { height: 34px; padding: 0 12px; font-size: 14px; }
 .btn.danger { background: var(--cloud); color: var(--sale); }
+.btn.txt { background: none; padding: 0 10px; } /* text-only button (after .danger so it wins) */
+.btn.txt:hover { background: var(--cloud); }
 .chip { all: unset; cursor: pointer; padding: 8px 16px; border: 1px solid var(--hairline); border-radius: 9999px; font-weight: 500; font-size: 14px; }
 .chip.on { background: var(--ink); color: #fff; border-color: var(--ink); }
 
@@ -223,5 +225,13 @@ dialog::backdrop { background: rgba(17, 17, 17, .5); }
 dialog .err { color: var(--sale); font-size: 14px; font-weight: 500; margin-top: 12px; }
 dialog h3 { font: 500 36px/0.95 var(--display); text-transform: uppercase; }
 dialog .row { margin-top: 24px; justify-content: flex-end; }
+dialog h3 { padding-right: 32px; } /* room for the X (36px wide, 22px from the edge, 26px into the content box) */
+dialog .x { all: unset; box-sizing: border-box; cursor: pointer; position: absolute; top: 22px; right: 22px; width: 36px; height: 36px; border-radius: 9999px; display: grid; place-items: center; color: var(--ink); }
+dialog .x:hover, dialog .x:focus-visible { background: var(--cloud); }
+/* member dialog footer: reversible actions left, hard delete alone on the next line, right */
+dialog .zone { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--hairline-soft); }
+dialog .zone .row { margin-top: 0; justify-content: flex-start; }
+dialog .zone .row.del { margin-top: 12px; justify-content: flex-end; }
+dialog .zone p { margin: 10px 4px 0; font-size: 14px; }
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 12px 24px; border-radius: 9999px; font-weight: 500; opacity: 0; transition: opacity .2s; pointer-events: none; }
 #toast.show { opacity: 1; }

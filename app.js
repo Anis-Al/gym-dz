@@ -39,11 +39,13 @@ function fail(e) {
 const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { fail(e); } };
 
 function modal(html, onSubmit, { wide = false } = {}) {
-  dlg.innerHTML = `<form method="dialog">${html}</form>`;
+  dlg.innerHTML = `<form method="dialog">${html}<button type="button" class="x" aria-label="Fermer" title="Fermer"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></form>`;
   const f = dlg.firstElementChild;
+  f.querySelector(".x").onclick = () => dlg.close(); // same as Esc; type=button so Enter in a field never hits it; last in the DOM so showModal() still focuses the first field
   f.querySelectorAll('[data-dd]').forEach(initDd);
+  // cancel buttons never submit: as the first submit button of the form they were its default button, so Enter in a field cancelled
+  f.querySelectorAll('[value=cancel]').forEach((b) => { b.type = 'button'; b.onclick = () => dlg.close(); });
   f.addEventListener('submit', guard(async (e) => {
-    if (e.submitter?.value === 'cancel') return;
     e.preventDefault();
     f.querySelector('.err')?.remove();
     await onSubmit(Object.fromEntries(new FormData(f)));
@@ -495,16 +497,16 @@ const pages = {
 
   async plans() {
     const plans = await api.plans();
-    view.innerHTML = `<h1>Abonnements</h1>
-      <div class="row" style="margin-bottom:20px"><p class="muted">Chaque abonnement a une durée, un prix et, si besoin, un maximum de séances par semaine.</p><div class="row end"><button class="btn" id="add">+ Nouvel abonnement</button></div></div>
+    view.innerHTML = `<h1>Formules</h1>
+      <div class="row" style="margin-bottom:20px"><p class="muted">Chaque formule a une durée, un prix et, si besoin, un maximum de séances par semaine.</p><div class="row end"><button class="btn" id="add">+ Nouvelle formule</button></div></div>
       <table><tr><th>Nom</th><th class="num">Durée (jours)</th><th class="num">Séances / semaine</th><th class="num">Prix</th><th></th></tr>${plans.map((p) => `
         <tr><td><b>${esc(p.nom)}</b></td><td class="num">${p.jours}</td><td class="num">${p.seances_sem ?? '<span class="muted">Illimité</span>'}</td><td class="num">${da(p.prix)}</td><td class="acts"><button class="btn sm alt" data-edit="${p.id}">Modifier</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></td></tr>`).join('')}</table>`;
     view.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
       const p = plans.find((x) => x.id == b.dataset.del);
-      modal(`<h3>Supprimer ?</h3><p class="muted" style="margin-top:12px">Abonnement « ${esc(p.nom)} ». Impossible s'il est utilisé par un membre ou un paiement.</p>${btns('Supprimer')}`,
-        async () => { await api.deletePlan(p.id); toast('Abonnement supprimé'); pages.plans(); });
+      modal(`<h3>Supprimer ?</h3><p class="muted" style="margin-top:12px">Formule « ${esc(p.nom)} ». Impossible si elle est utilisée par un membre ou un paiement.</p>${btns('Supprimer')}`,
+        async () => { await api.deletePlan(p.id); toast('Formule supprimée'); pages.plans(); });
     });
-    const dialog = (p = {}) => modal(`<h3>${p.id ? 'Modifier' : 'Nouvel'} abonnement</h3>
+    const dialog = (p = {}) => modal(`<h3>${p.id ? 'Modifier la' : 'Nouvelle'} formule</h3>
       <input type="hidden" name="id" value="${p.id ?? ''}">
       <label>Nom</label><input name="nom" required value="${esc(p.nom)}">
       <label>Durée (jours)</label><input name="jours" type="number" min="1" required value="${p.jours ?? 30}">
@@ -521,19 +523,21 @@ async function memberDialog(m = {}) {
   const plans = await api.plans();
   const arch = !!m.archive_le;
   const paused = !arch && !!m.gel_fin && m.gel_fin >= todayStr(); // a pause in progress or planned
-  // below the form: pause / archive (or reactivate) / delete for good
-  const actions = !m.id ? '' : `<div class="row" style="margin-top:20px;justify-content:flex-start">${arch
+  // below the form, under a hairline (.zone): reversible actions as small pills on the left (pause / archive, or reactivate),
+  // the hard delete alone on the next line, pushed right, as a red text button: never beside the benign ones, never wrapping mid-row
+  const actions = !m.id ? '' : `<div class="zone"><div class="row">${arch
       ? '<button type="button" class="btn sm" id="unarch">Réactiver</button>'
       : (paused ? '<button type="button" class="btn sm alt" id="gel">Reprendre maintenant</button>'
         : m.fin >= todayStr() ? '<button type="button" class="btn sm alt" id="gel">Mettre en pause…</button>' : '') + '<button type="button" class="btn sm alt" id="arch">Archiver</button>'
-    }<button type="button" class="btn sm danger" id="del">Supprimer définitivement</button></div>${
-    paused ? `<p class="muted" style="margin:10px 4px 0;font-size:14px">Pause du ${fdate(m.gel_debut)} au ${fdate(m.gel_fin)}.</p>` : ''}${
-    arch ? `<p class="muted" style="margin:10px 4px 0;font-size:14px">Archivé le ${fdate(m.archive_le)} : hors des listes et des statistiques, il ne peut plus entrer.</p>` : ''}`;
+    }</div>${
+    paused ? `<p class="muted">Pause du ${fdate(m.gel_debut)} au ${fdate(m.gel_fin)}.</p>` : ''}${
+    arch ? `<p class="muted">Archivé le ${fdate(m.archive_le)} : hors des listes et des statistiques, il ne peut plus entrer.</p>` : ''}
+    <div class="row del"><button type="button" class="btn sm txt danger" id="del">Supprimer définitivement</button></div></div>`;
   modal(`<h3>${m.id ? 'Modifier' : 'Nouveau'} membre</h3>
     <input type="hidden" name="id" value="${m.id ?? ''}">
     <label>Nom complet</label><input name="nom" required value="${esc(m.nom)}">
     <label>Téléphone</label><input name="tel" inputmode="tel" placeholder="0555 12 34 56" value="${esc(m.tel)}">
-    ${m.id ? '' : `<label>Abonnement (paiement enregistré)</label>${dd('plan_id', [{ v: '', l: "Aucun pour l'instant" }, ...planOpts(plans)], '')}
+    ${m.id ? '' : `<label>Formule (paiement enregistré)</label>${dd('plan_id', [{ v: '', l: "Aucun pour l'instant" }, ...planOpts(plans)], '')}
       <label>Montant versé (DA)</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">`}
     <label>Notes</label><input name="notes" value="${esc(m.notes)}">${btns()}
     ${actions}`,
@@ -569,8 +573,10 @@ const IMPORTS = {
 function importDialog(kind = 'members') {
   const k = IMPORTS[kind];
   modal(`<h3>Importer des ${k.titre}</h3>
-    <p class="muted" style="margin-top:12px">1. Téléchargez le modèle Excel et remplissez l'onglet ${k.onglet}.<br>2. Choisissez le fichier rempli (.xlsx ou .csv).</p>
-    <div class="row"><button class="btn alt" value="cancel" formnovalidate>Fermer</button><button type="button" class="btn alt" id="dl">Télécharger le modèle</button><button type="button" class="btn" id="pick">Choisir le fichier</button></div>`, async () => {});
+    <p class="muted" style="margin-top:12px">1. Téléchargez le modèle Excel et remplissez l'onglet ${k.onglet}.</p>
+    <div class="row" style="margin-top:12px;justify-content:flex-start"><button type="button" class="btn alt" id="dl">Télécharger le modèle</button></div>
+    <p class="muted" style="margin-top:20px">2. Choisissez le fichier rempli (.xlsx ou .csv).</p>
+    <div class="row" style="margin-top:12px;justify-content:flex-start"><button type="button" class="btn" id="pick">Choisir le fichier</button></div>`, async () => {});
   $('#dl').onclick = guard(async () => { if (await api[k.model]()) toast('Modèle enregistré'); });
   $('#pick').onclick = guard(async () => {
     const r = await api[k.pick]();
@@ -605,7 +611,7 @@ function salesDialog(tickets) {
   modal(`<h3>Ventes du jour</h3><p class="muted" style="margin-top:8px">${tickets.length} ticket${tickets.length > 1 ? 's' : ''} · ${da(day)}</p>
     <div class="tk-list">${tickets.length ? `<table><tr><th>N°</th><th>Heure</th><th>Articles</th><th class="num">Total</th><th></th></tr>${tickets.map((t) => `
       <tr><td class="muted">${t.ticket ?? '—'}</td><td class="muted">${hm(t.ts)}</td><td class="wrap">${esc(sum(t))}</td><td class="num">${da(t.total)}</td><td class="acts"><button type="button" class="chip" data-cancel="${t.key}">Annuler</button></td></tr>`).join('')}</table>` : '<div class="empty">Aucune vente aujourd\'hui.</div>'}</div>
-    <div class="row"><button class="btn alt" value="cancel" formnovalidate>Fermer</button></div>`, async () => {}, { wide: true });
+    `, async () => {}, { wide: true });
   dlg.querySelectorAll('[data-cancel]').forEach((b) => b.onclick = () => {
     const t = tickets.find((x) => String(x.key) === b.dataset.cancel);
     dlg.close();
@@ -691,7 +697,7 @@ async function renewDialog(id, back) {
   const [plans, found] = await Promise.all([api.plans(), api.members(String(id))]);
   const m = found.find((x) => x.id === id); // the search also matches phone numbers, so pick the exact member
   modal(`<h3>Renouveler</h3><p class="muted" style="margin-top:8px">${esc(m.nom)} — fin actuelle : ${fdate(m.fin)}</p>
-    <label>Abonnement</label>${dd('plan_id', planOpts(plans), m.plan_id)}
+    <label>Formule</label>${dd('plan_id', planOpts(plans), m.plan_id)}
     <label>Montant versé (DA)</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">
     <p class="muted" style="margin-top:12px;font-size:14px">Montant plus bas que le prix : le reste est noté en dette.<br>La période commence à la fin actuelle (aujourd'hui si expiré).</p>${btns('Encaisser')}`,
     async (d) => { const r = await api.renew(id, +d.plan_id, d.verse === '' ? null : +d.verse); toast(`Paiement enregistré — valable jusqu'au ${fdate(r.fin)}`, 4000); typeof back === 'function' ? back() : pages[back](); });
@@ -718,7 +724,7 @@ async function backupDialog() {
     <div class="row" style="margin-top:8px;justify-content:flex-start"><button type="button" class="btn sm" id="now">Sauvegarder maintenant…</button><button type="button" class="btn alt sm" id="restore">Restaurer une sauvegarde…</button></div>
     <label style="margin-top:24px">Démarrage</label>
     ${auto.dispo ? `<label class="chk"><input type="checkbox" id="auto" ${auto.on ? 'checked' : ''}> Lancer l'application au démarrage de Windows</label>` : '<p class="muted" style="margin:0 4px">Disponible dans la version installée.</p>'}
-    <div class="row"><button class="btn alt" value="cancel" formnovalidate>Fermer</button></div>`, async () => {});
+    `, async () => {});
   $('#chdir').onclick = guard(async () => { if (await api.chooseBackupDir()) { dlg.close(); toast('Dossier enregistré'); } });
   $('#now').onclick = guard(async () => { if (await api.backup()) { dlg.close(); toast('Sauvegarde créée'); } });
   $('#auto')?.addEventListener('change', guard(async (e) => { await api.setAutostart(e.target.checked); toast(e.target.checked ? 'Démarrage automatique activé' : 'Démarrage automatique désactivé'); }));
