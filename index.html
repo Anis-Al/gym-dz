@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav>
+    <div class="logo"></div>
+    <div class="grp">Comptoir</div>
+    <button data-p="checkin">Entrées</button>
+    <button data-p="members">Membres</button>
+    <button data-p="shop">Boutique</button>
+    <div class="grp">Suivi</div>
+    <button data-p="dash">Tableau de bord</button>
+    <button data-p="caisse">Caisse</button>
+    <div class="sp"></div>
+    <div class="grp">Catalogue</div>
+    <button data-p="plans">Abonnements</button>
+    <button data-p="products">Produits</button>
+    <div class="sep"></div>
+    <button id="backup">Paramètres</button>
+  </nav>
+  <main id="view"></main>
+  <dialog id="dlg"></dialog>
+  <div id="toast"></div>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

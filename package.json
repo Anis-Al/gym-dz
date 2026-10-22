@@ -1,0 +1,14 @@
+{
+  "name": "gym-dz",
+  "version": "1.0.0",
+  "description": "Gestion de salle de sport (hors-ligne, sur site)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --config electron-builder.config.js"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "electron-builder": "^26.15.3"
+  }
+}
