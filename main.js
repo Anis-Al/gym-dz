@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session, nativeImage } = require('electron');
 const { DatabaseSync } = require('node:sqlite');
 const path = require('path');
 const fs = require('fs');
@@ -28,26 +28,36 @@ const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 const settings = () => { try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; } };
 const defaultBackupDir = () => path.join(app.getPath('documents'), `${app.getName()}-sauvegardes`); // follows the package.json "name"
 const backupDir = () => settings().backupDir || defaultBackupDir();
-const AUTO_RE = /^gym-auto-.*\.db$/;
+// automatic copies: gym-auto-<stamp> at every close, gym-periodique-<stamp> every 2 hours while the app runs (a power cut loses 2 hours at most).
+// Each series keeps its 10 newest files, so the close copies still go back ~10 days while the periodic ones cover the last day or two.
+const AUTO_RE = /^gym-(auto|periodique)-(\d{4}-\d\d-\d\d-\d{6})\.db$/;
+const PERIODIC_MS = 2 * 3600e3;
 
 const stamp = () => { const p = (n) => String(n).padStart(2, '0'), d = new Date(); return `${today()}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
 
-// copy the DB into the backup folder; if the chosen folder (USB) is unavailable fall back to Documents. prune = keep the 10 newest gym-auto-*.db
+// copy the DB into the backup folder; if the chosen folder (USB) is unavailable fall back to Documents. prune = series prefix whose 10 newest files are kept
 function snapshot(name, prune) {
   db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   for (const dir of [backupDir(), defaultBackupDir()]) {
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.copyFileSync(dbFile, path.join(dir, name));
-      if (prune) fs.readdirSync(dir).filter((f) => AUTO_RE.test(f)).sort().slice(0, -10).forEach((f) => fs.unlinkSync(path.join(dir, f)));
+      if (prune) fs.readdirSync(dir).filter((f) => f.startsWith(prune + '-') && AUTO_RE.test(f)).sort().slice(0, -10).forEach((f) => fs.unlinkSync(path.join(dir, f)));
       return dir;
     } catch (e) { console.error('Copie échouée dans', dir, e.message); }
   }
   throw new Error('Impossible de créer la copie de sécurité');
 }
-function autoBackup() {
-  try { snapshot(`gym-auto-${stamp()}.db`, true); } catch (e) { console.error('Sauvegarde auto échouée', e.message); }
+function autoBackup(prefix = 'gym-auto') {
+  try { snapshot(`${prefix}-${stamp()}.db`, prefix); } catch (e) { console.error('Sauvegarde auto échouée', e.message); }
 }
+async function saveXlsx(defaultName, sheets) {
+  const r = await dialog.showSaveDialog({ defaultPath: defaultName, filters: [{ name: 'Excel', extensions: ['xlsx'] }] });
+  if (r.canceled) return false;
+  fs.writeFileSync(r.filePath, xlsx.write(sheets));
+  return true;
+}
+const fr = (s) => (s ? s.split('-').reverse().join('/') : ''); // YYYY-MM-DD -> JJ/MM/AAAA (exports)
 
 // a file is accepted as a backup only if it is a SQLite database with our core tables
 function checkDb(file) {
@@ -97,6 +107,8 @@ function initDb() {
     -- later cash received against a payment that was not paid in full
     CREATE TABLE IF NOT EXISTS versements(id INTEGER PRIMARY KEY, payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
       member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE, montant INTEGER NOT NULL, date TEXT NOT NULL);
+    -- optional member photo (320x320 JPEG, ~15 KB), kept inside the database so a backup stays one file
+    CREATE TABLE IF NOT EXISTS photos(member_id INTEGER PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE, jpeg BLOB NOT NULL);
   `);
   // payments.prix = price of the period (montant = cash received when it was recorded); NULL = paid in full
   // members.gel_debut/gel_fin = the (last or planned) membership pause, inclusive dates
@@ -105,6 +117,8 @@ function initDb() {
   // payments.prev = JSON snapshot of the member's plan/debut/fin before the payment, so cancelling restores it exactly
   if (!db.prepare("SELECT 1 FROM pragma_table_info('payments') WHERE name='prev'").get()) db.exec('ALTER TABLE payments ADD COLUMN prev TEXT');
   if (!db.prepare("SELECT 1 FROM pragma_table_info('products') WHERE name='categorie'").get()) db.exec('ALTER TABLE products ADD COLUMN categorie TEXT');
+  // products.code_barre = barcode as printed on the item (optional, unique): a USB scanner typing it + Enter in the Boutique search adds the product
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('products') WHERE name='code_barre'").get()) db.exec('ALTER TABLE products ADD COLUMN code_barre TEXT');
   // plans.seances_sem = max days of attendance per week for this plan (NULL = unlimited), enforced at check-in
   if (!db.prepare("SELECT 1 FROM pragma_table_info('plans') WHERE name='seances_sem'").get()) db.exec('ALTER TABLE plans ADD COLUMN seances_sem INTEGER');
   // members.archive_le = date the member was archived (NULL = active member): hidden from lists, stats and check-in, history kept
@@ -139,6 +153,20 @@ function initDb() {
 const DETTE_PAY = `(COALESCE(y.prix, y.montant) - y.montant - COALESCE((SELECT SUM(v.montant) FROM versements v WHERE v.payment_id = y.id), 0))`;
 const DETTE_M = `(SELECT COALESCE(SUM(${DETTE_PAY}), 0) FROM payments y WHERE y.member_id = m.id)`;
 
+const INACTIF_J = 14; // days without a check-in after which a valid member counts as inactive (Membres chip, dashboard card)
+
+// member photos: whatever comes in (webcam frame, picked file) is centre-cropped to a square and stored as a 320px JPEG
+const PHOTO_PX = 320;
+const toDataUrl = (jpeg) => 'data:image/jpeg;base64,' + Buffer.from(jpeg).toString('base64');
+const photoOf = (id) => { const r = db.prepare('SELECT jpeg FROM photos WHERE member_id=?').get(id); return r ? toDataUrl(r.jpeg) : null; };
+function storePhoto(id, img) {
+  if (!img || img.isEmpty()) throw new Error('Image illisible');
+  if (!db.prepare('SELECT 1 FROM members WHERE id=?').get(id)) throw new Error('Introuvable');
+  const { width, height } = img.getSize(), s = Math.min(width, height);
+  const sq = img.crop({ x: Math.floor((width - s) / 2), y: Math.floor((height - s) / 2), width: s, height: s }).resize({ width: PHOTO_PX, height: PHOTO_PX, quality: 'best' });
+  db.prepare('INSERT OR REPLACE INTO photos(member_id, jpeg) VALUES(?, ?)').run(id, sq.toJPEG(80));
+}
+
 const nextTicket = () => db.prepare('SELECT COALESCE(MAX(ticket), 0) + 1 n FROM sales').get().n;
 // puts a sold line's stock back: qty units, or qty doses
 const restoreStock = (s) => {
@@ -163,6 +191,8 @@ const api = {
         + one('SELECT COALESCE(SUM(montant),0) c FROM versements WHERE date = ?', t)
         + one('SELECT COALESCE(SUM(montant),0) c FROM sales WHERE date = ?', t),
       dettes: db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(d), 0) total FROM (SELECT SUM(${DETTE_PAY}) d FROM payments y GROUP BY y.member_id HAVING d > 0)`).get(),
+      // valid subscription but no check-in for 14 days (or never): members to call before they lapse
+      inactifs: one(`SELECT COUNT(*) c FROM members m WHERE archive_le IS NULL AND fin >= ? AND COALESCE((SELECT MAX(day) FROM checkins c WHERE c.member_id = m.id), '') < ?`, t, addDays(t, -INACTIF_J)),
       aRenouveler: db.prepare(`SELECT id, nom, tel, fin FROM members WHERE archive_le IS NULL AND fin <= ? ORDER BY fin DESC, nom`).all(addDays(t, 7)),
     };
   },
@@ -178,15 +208,18 @@ const api = {
   saveProduct(p) {
     if (!p.nom || !(p.prix >= 0) || (p.prix_dose != null && !(p.prix_dose >= 0))) throw new Error('Produit invalide');
     const cat = (p.categorie || '').trim() || null; // free text, blank = no category
+    const code = (p.code_barre || '').trim() || null; // optional barcode, unique
+    const dup = code && db.prepare('SELECT nom FROM products WHERE code_barre=? AND id IS NOT ?').get(code, p.id ?? null);
+    if (dup) throw new Error(`Code-barres déjà utilisé par « ${dup.nom} »`);
     if (p.id) {
-      db.prepare('UPDATE products SET nom=?, prix=?, prix_dose=CASE WHEN doses>1 THEN ? ELSE NULL END, categorie=? WHERE id=?').run(p.nom, p.prix, p.prix_dose, cat, p.id);
+      db.prepare('UPDATE products SET nom=?, prix=?, prix_dose=CASE WHEN doses>1 THEN ? ELSE NULL END, categorie=?, code_barre=? WHERE id=?').run(p.nom, p.prix, p.prix_dose, cat, code, p.id);
       return;
     }
     p.prix = Math.round(p.prix); // prices are whole DA
     if (p.prix_dose != null) p.prix_dose = Math.round(p.prix_dose);
     const doses = p.doses || 1;
     if (!Number.isInteger(doses) || doses < 1 || (doses > 1) !== (p.prix_dose != null)) throw new Error('Doses par unité et prix de la dose vont ensemble');
-    db.prepare('INSERT INTO products(nom,prix,doses,prix_dose,stock,categorie) VALUES(?,?,?,?,?,?)').run(p.nom, p.prix, doses, p.prix_dose, Math.max(0, Math.round((p.stock || 0) * doses)), cat);
+    db.prepare('INSERT INTO products(nom,prix,doses,prix_dose,stock,categorie,code_barre) VALUES(?,?,?,?,?,?,?)').run(p.nom, p.prix, doses, p.prix_dose, Math.max(0, Math.round((p.stock || 0) * doses)), cat, code);
   },
   deleteProduct: (id) => void db.prepare('DELETE FROM products WHERE id=?').run(id), // sales keep the product name
   restock(id, bottles) { // bottles may be negative to correct a miscount
@@ -271,17 +304,28 @@ const api = {
     if (n) throw new Error('Formule utilisée par des membres ou des paiements');
     db.prepare('DELETE FROM plans WHERE id=?').run(id);
   },
-  async importModel() {
-    const r = await dialog.showSaveDialog({ defaultPath: 'modele-membres.xlsx', filters: [{ name: 'Excel', extensions: ['xlsx'] }] });
-    if (r.canceled) return false;
+  importModel() {
     const plans = api.plans();
-    fs.writeFileSync(r.filePath, xlsx.write([
+    return saveXlsx('modele-membres.xlsx', [
       { name: 'Membres', widths: [28, 18, 22, 14, 36], textCols: [0, 1, 2, 3, 4], rows: [
         ['nom', 'tel', 'formule', 'fin', 'notes'],
         ['Ahmed Benali', '0555 12 34 56', plans[0]?.nom ?? '', '31/12/2026', 'exemple (supprimer cette ligne)']] },
       { name: 'Formules', widths: [28, 10, 12], rows: [['formule', 'jours', 'prix (DA)'], ...plans.map((p) => [p.nom, p.jours, p.prix])] },
-    ]));
-    return true;
+    ]);
+  },
+  // generic Excel export: the renderer builds the sheet ({ name, widths, textCols, rows }) from what it shows (Membres: the filtered list)
+  exportXlsx({ name, sheet }) { return saveXlsx(name, [sheet]); },
+  // every cash operation of a month ('YYYY-MM'), one row each, oldest first, then a total row
+  exportCaisse(month) {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('Mois invalide');
+    const ops = [
+      ...db.prepare(`SELECT y.date, 'Abonnement' type, m.nom || ' — ' || COALESCE(p.nom, '(sans formule)') || ' · ' || y.debut || ' → ' || y.fin detail, y.montant FROM payments y JOIN members m ON m.id = y.member_id LEFT JOIN plans p ON p.id = y.plan_id WHERE substr(y.date, 1, 7) = ?`).all(month),
+      ...db.prepare(`SELECT v.date, 'Règlement de dette' type, m.nom detail, v.montant FROM versements v JOIN members m ON m.id = v.member_id WHERE substr(v.date, 1, 7) = ?`).all(month),
+      ...db.prepare(`SELECT date, 'Boutique' type, CASE WHEN qty > 1 THEN qty || '× ' ELSE '' END || nom || CASE WHEN dose THEN ' (dose)' ELSE '' END || CASE WHEN ticket IS NULL THEN '' ELSE ' · ticket ' || ticket END detail, montant FROM sales WHERE substr(date, 1, 7) = ?`).all(month),
+    ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const rows = ops.map((o) => [fr(o.date), o.type, o.detail.replace(/(\d{4})-(\d\d)-(\d\d)/g, '$3/$2/$1'), o.montant]);
+    rows.push(['', 'Total', `${ops.length} opération${ops.length > 1 ? 's' : ''}`, ops.reduce((a, o) => a + o.montant, 0)]);
+    return saveXlsx(`caisse-${month}.xlsx`, [{ name: 'Caisse', widths: [12, 20, 60, 14], textCols: [0, 1, 2], rows: [['date', 'type', 'détail', 'montant (DA)'], ...rows] }]);
   },
   // columns: nom, tel, formule (plan name), fin (JJ/MM/AAAA), notes. First tab of .xlsx, or a .csv. No payment is created: this loads existing members.
   async importMembers() {
@@ -315,16 +359,13 @@ const api = {
     }); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; }
     return res;
   },
-  async importProductsModel() {
-    const r = await dialog.showSaveDialog({ defaultPath: 'modele-produits.xlsx', filters: [{ name: 'Excel', extensions: ['xlsx'] }] });
-    if (r.canceled) return false;
-    fs.writeFileSync(r.filePath, xlsx.write([{ name: 'Produits', widths: [28, 12, 14, 14, 14, 18], textCols: [0, 1, 2, 3, 4, 5], rows: [
-      ['nom', 'prix', 'doses par unité', 'prix dose', 'stock', 'catégorie'],
-      ['Eau 1,5L', '50', '', '', '24', 'Boissons'],
-      ['Whey 2kg', '9000', '30', '400', '2', 'Compléments']] }]));
-    return true;
+  importProductsModel() {
+    return saveXlsx('modele-produits.xlsx', [{ name: 'Produits', widths: [28, 12, 14, 14, 14, 18, 18], textCols: [0, 1, 2, 3, 4, 5, 6], rows: [
+      ['nom', 'prix', 'doses par unité', 'prix dose', 'stock', 'catégorie', 'code-barres'],
+      ['Eau 1,5L', '50', '', '', '24', 'Boissons', '6130000000001'],
+      ['Whey 2kg', '9000', '30', '400', '2', 'Compléments', '']] }]);
   },
-  // columns: nom, prix (DA), doses par unité (empty = not sold by the dose), prix dose, stock (units), catégorie (optional). Existing names are skipped.
+  // columns: nom, prix (DA), doses par unité (empty = not sold by the dose), prix dose, stock (units), catégorie (optional), code-barres (optional). Existing names are skipped.
   async importProducts() {
     const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Excel et CSV', extensions: ['xlsx', 'csv'] }, { name: 'Excel (.xlsx)', extensions: ['xlsx'] }, { name: 'CSV (.csv)', extensions: ['csv'] }, { name: 'Tous les fichiers', extensions: ['*'] }] });
     if (r.canceled) return null;
@@ -336,11 +377,11 @@ const api = {
     db.exec('BEGIN');
     try {
       rows.slice(1).forEach((c, i) => {
-        const [nom = '', prix = '', doses = '', pd = '', stock = '', categorie = ''] = c.map((x) => x.trim());
+        const [nom = '', prix = '', doses = '', pd = '', stock = '', categorie = '', code_barre = ''] = c.map((x) => x.trim());
         if (!c.some((x) => x.trim())) return;
         if (exists.get(nom)) return void res.ignores++;
         try {
-          api.saveProduct({ nom, prix: num(prix) ?? NaN, doses: num(doses) ?? 1, prix_dose: num(pd), stock: num(stock) ?? 0, categorie });
+          api.saveProduct({ nom, prix: num(prix) ?? NaN, doses: num(doses) ?? 1, prix_dose: num(pd), stock: num(stock) ?? 0, categorie, code_barre });
           res.ajoutes++;
         } catch (e) { res.erreurs.push(`Ligne ${i + 2} : ${e.message}`); }
       });
@@ -348,20 +389,68 @@ const api = {
     } catch (e) { db.exec('ROLLBACK'); throw e; }
     return res;
   },
+  // derniere = last check-in day (NULL = never came), read through idx_checkins_member_day; a_photo = has a photo (fetch it with photos())
   members(q = '') {
     const like = `%${q}%`;
-    return db.prepare(`SELECT m.*, p.nom plan, ${DETTE_M} dette FROM members m LEFT JOIN plans p ON p.id = m.plan_id
+    return db.prepare(`SELECT m.*, p.nom plan, ${DETTE_M} dette, (SELECT MAX(day) FROM checkins c WHERE c.member_id = m.id) derniere,
+      EXISTS(SELECT 1 FROM photos f WHERE f.member_id = m.id) a_photo
+      FROM members m LEFT JOIN plans p ON p.id = m.plan_id
       WHERE m.nom LIKE ? OR m.tel LIKE ? OR CAST(m.id AS TEXT) = ? ORDER BY m.nom`).all(like, like, q.trim());
   },
+  // photos of the members on screen only: id -> data URL (the blobs never travel with the member list)
+  photos: (ids) => Object.fromEntries(ids.map((id) => [id, photoOf(id)]).filter(([, u]) => u)),
+  savePhoto(id, dataUrl) { // from the webcam dialog
+    const m = String(dataUrl).match(/^data:image\/(?:jpeg|png);base64,(.+)$/);
+    if (!m) throw new Error('Image invalide');
+    storePhoto(id, nativeImage.createFromBuffer(Buffer.from(m[1], 'base64')));
+  },
+  async pickPhoto(id) { // from a file (phone photo copied over, scanner…)
+    const r = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png'] }] });
+    if (r.canceled) return false;
+    storePhoto(id, nativeImage.createFromPath(r.filePaths[0]));
+    return true;
+  },
+  deletePhoto: (id) => void db.prepare('DELETE FROM photos WHERE member_id=?').run(id),
+  // edit form also carries `fin`: the end date can be corrected by hand (gift days, a wrong import); empty = no subscription
   saveMember(m) {
     if (!m.nom || !m.nom.trim()) throw new Error('Nom obligatoire');
     if (m.id) {
-      db.prepare('UPDATE members SET nom=?, tel=?, notes=? WHERE id=?').run(m.nom.trim(), m.tel || '', m.notes || '', m.id);
+      const fin = m.fin || null;
+      if (fin && iso(new Date(fin + 'T00:00:00')) !== fin) throw new Error('Date de fin invalide');
+      db.prepare('UPDATE members SET nom=?, tel=?, notes=?, fin=? WHERE id=?').run(m.nom.trim(), m.tel || '', m.notes || '', fin, m.id);
       return m.id;
     }
     const id = db.prepare('INSERT INTO members(nom,tel,notes) VALUES(?,?,?)').run(m.nom.trim(), m.tel || '', m.notes || '').lastInsertRowid;
     if (m.plan_id) api.renew(Number(id), m.plan_id, m.verse);
     return Number(id);
+  },
+  // the gym was closed (holidays, works, Ramadan hours): every subscription valid today ends `jours` days later
+  extendAll(jours) {
+    const n = Math.round(Number(jours));
+    if (!(n >= 1 && n <= 365)) throw new Error('Nombre de jours invalide (1 à 365)');
+    return db.prepare('UPDATE members SET fin = date(fin, ?) WHERE archive_le IS NULL AND fin >= ?').run(`+${n} days`, today()).changes;
+  },
+  // one member's full story: payments (with what is still owed on each), later versements, last check-ins and attendance counts
+  memberHistory(id) {
+    const member = db.prepare(`SELECT m.*, p.nom plan, ${DETTE_M} dette FROM members m LEFT JOIN plans p ON p.id = m.plan_id WHERE m.id=?`).get(id);
+    if (!member) throw new Error('Introuvable');
+    member.photo = photoOf(id);
+    return {
+      member,
+      paiements: db.prepare(`SELECT y.id, y.date, y.montant, y.prix, y.debut, y.fin, p.nom plan, ${DETTE_PAY} dette FROM payments y LEFT JOIN plans p ON p.id = y.plan_id WHERE y.member_id=? ORDER BY y.id DESC`).all(id),
+      versements: db.prepare('SELECT id, date, montant FROM versements WHERE member_id=? ORDER BY id DESC').all(id),
+      entrees: db.prepare('SELECT ts, day FROM checkins WHERE member_id=? ORDER BY id DESC LIMIT 30').all(id),
+      nbEntrees: db.prepare('SELECT COUNT(*) c FROM checkins WHERE member_id=?').get(id).c,
+      nbMois: db.prepare('SELECT COUNT(*) c FROM checkins WHERE member_id=? AND day >= ?').get(id, today().slice(0, 7) + '-01').c,
+    };
+  },
+  // opens a WhatsApp chat with the member in the default browser (the PC needs internet); Algerian numbers: 0555… -> 213555…
+  whatsapp(tel, text = '') {
+    let n = String(tel || '').replace(/\D/g, '');
+    if (n.startsWith('00')) n = n.slice(2);
+    if (n.startsWith('0')) n = '213' + n.slice(1);
+    if (n.length < 10) throw new Error('Numéro de téléphone invalide');
+    return shell.openExternal(`https://wa.me/${n}${text ? `?text=${encodeURIComponent(text)}` : ''}`);
   },
   // hard delete: also erases the member's payments and check-ins, so past revenue shrinks. The UI pushes archiveMember instead.
   deleteMember: (id) => void db.prepare('DELETE FROM members WHERE id=?').run(id),
@@ -373,6 +462,17 @@ const api = {
     db.prepare('UPDATE members SET archive_le=? WHERE id=?').run(today(), id);
   },
   unarchiveMember: (id) => void db.prepare('UPDATE members SET archive_le=NULL WHERE id=?').run(id),
+  // bulk archive: members whose subscription ended more than `mois` months ago (never subscribed = created that long ago); those who owe money are skipped.
+  // dryRun = count only, for the confirmation. Returns { n, dettes } = archived (or to archive) / skipped for debt
+  archiveOld(mois, dryRun = false) {
+    const n = Math.round(Number(mois));
+    if (!(n >= 1 && n <= 60)) throw new Error('Nombre de mois invalide (1 à 60)');
+    const limit = db.prepare('SELECT date(?, ?) d').get(today(), `-${n} months`).d;
+    const rows = db.prepare(`SELECT m.id, ${DETTE_M} dette FROM members m WHERE m.archive_le IS NULL AND COALESCE(m.fin, m.created, '') < ?`).all(limit);
+    const ok = rows.filter((r) => r.dette <= 0);
+    if (!dryRun && ok.length) db.prepare(`UPDATE members SET archive_le=? WHERE id IN (${ok.map(() => '?').join(',')})`).run(today(), ...ok.map((r) => r.id));
+    return { n: ok.length, dettes: rows.length - ok.length };
+  },
   // what a hard delete would erase, shown in its confirmation
   memberPaid: (id) => db.prepare('SELECT COUNT(*) n, COALESCE(SUM(montant), 0) + COALESCE((SELECT SUM(v.montant) FROM versements v WHERE v.member_id = ?), 0) total FROM payments WHERE member_id = ?').get(id, id),
   // renew: new period starts at the later of today / current end + 1 day, so paying early loses nothing
@@ -489,7 +589,8 @@ const api = {
   backupInfo() {
     const dir = backupDir();
     let last = null;
-    try { last = fs.readdirSync(dir).filter((f) => AUTO_RE.test(f)).sort().pop() ?? null; } catch { /* folder missing (USB unplugged) */ }
+    // newest automatic copy of either series, by the date-time in the name
+    try { last = fs.readdirSync(dir).map((f) => f.match(AUTO_RE)).filter(Boolean).sort((a, b) => (a[2] < b[2] ? -1 : 1)).pop()?.[0] ?? null; } catch { /* folder missing (USB unplugged) */ }
     return { dir, last };
   },
   async chooseBackupDir() {
@@ -501,6 +602,7 @@ const api = {
   checkin(memberId) {
     const m = db.prepare(`SELECT m.*, p.nom plan, p.seances_sem, ${DETTE_M} dette FROM members m LEFT JOIN plans p ON p.id=m.plan_id WHERE m.id=?`).get(memberId);
     if (!m) return { ok: false, code: 'inconnu', motif: 'Membre introuvable' };
+    m.photo = photoOf(memberId); // the banner shows the face next to the name, so the desk can match the person
     if (m.archive_le) return { ok: false, code: 'archive', motif: 'Membre archivé — réactivez-le dans Membres', member: m };
     const t = today();
     if (!m.fin || m.fin < t) return { ok: false, code: 'expire', motif: 'Abonnement expiré', member: m };
@@ -523,6 +625,10 @@ const api = {
     return { ok: true, member: m, deja: !!deja, semaine };
   },
   checkinsToday: () => db.prepare(`SELECT c.ts, m.id, m.nom FROM checkins c JOIN members m ON m.id=c.member_id WHERE c.day=? ORDER BY c.id DESC`).all(today()),
+  // wrong person clicked: removes today's check-in (it counted against the weekly limit)
+  uncheckin(memberId) {
+    if (!db.prepare('DELETE FROM checkins WHERE member_id=? AND day=?').run(memberId, today()).changes) throw new Error("Aucune entrée aujourd'hui pour ce membre");
+  },
   async backup() {
     const r = await dialog.showSaveDialog({ defaultPath: `gym-sauvegarde-${today()}.db`, filters: [{ name: 'Base de données', extensions: ['db'] }] });
     if (r.canceled) return false;
@@ -534,6 +640,8 @@ const api = {
 
 app.whenReady().then(() => {
   initDb();
+  if (!process.env.GYM_DEMO) setInterval(() => autoBackup('gym-periodique'), PERIODIC_MS);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'media')); // webcam for member photos, nothing else
   ipcMain.handle('api', async (_e, name, ...args) => {
     try {
       return { data: await api[name](...args) };
@@ -543,7 +651,7 @@ app.whenReady().then(() => {
   });
   const win = new BrowserWindow({
     width: 1280, height: 820, minWidth: 1000, minHeight: 640, backgroundColor: '#ffffff',
-    title: APP.name, autoHideMenuBar: true,
+    title: APP.name, autoHideMenuBar: true, icon: path.join(__dirname, 'build', 'icon.ico'), // taskbar icon in dev; the installed exe carries its own
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
   });
   win.on('page-title-updated', (e) => e.preventDefault()); // the window title comes from config.js, not from the page

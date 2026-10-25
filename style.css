@@ -82,12 +82,47 @@ td.acts { text-align: right; }
 td.wrap { white-space: normal; max-width: 220px; }
 .acts .btn { margin-left: 8px; }
 .empty { padding: 48px; text-align: center; color: var(--mute); background: var(--cloud); border-radius: 24px; }
+.sub { font-size: 12px; color: var(--mute); } /* second line under a cell's main text (last visit, barcode) */
+/* text that acts (member name opens the history, phone number opens WhatsApp): plain, underlined on hover */
+.lnk { all: unset; cursor: pointer; }
+.lnk:hover, .lnk:focus-visible { text-decoration: underline; }
+/* member photo (optional): round avatar, the first letter on grey when there is none */
+.av { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: var(--hairline-soft); color: var(--mute); font-weight: 500; font-size: 14px; object-fit: cover; vertical-align: middle; }
+.av.s64 { width: 64px; height: 64px; font-size: 26px; }
+.av.s72 { width: 72px; height: 72px; font-size: 28px; }
+.av.s88 { width: 88px; height: 88px; font-size: 36px; }
+.nm { display: flex; align-items: center; gap: 12px; }
+.result .who { display: flex; align-items: center; gap: 20px; }
+.result .av { background: rgba(255, 255, 255, .22); color: #fff; }
+dialog .row.ph { margin-top: 8px; justify-content: flex-start; }
+dialog .row.hd { margin-top: 0; justify-content: flex-start; flex-wrap: nowrap; gap: 20px; }
+.cam { margin-top: 16px; aspect-ratio: 4 / 3; border-radius: 24px; overflow: hidden; background: var(--cloud); }
+.cam video { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* member history dialog: header lines + actions right, four small figures, ledger left / check-ins right */
+dialog .row.hd .who p { margin-top: 4px; }
+dialog .row.hd .who .note { margin-top: 6px; }
+dialog .row.hd .who { flex: 1; min-width: 0; }
+dialog .row.hd .acts { margin: 0 32px 0 auto; align-self: flex-start; gap: 8px; flex-wrap: nowrap; } /* 32px: clear of the X close button */
+.grid.mini { grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+.card.mini { padding: 12px 16px; }
+.card.mini .k { font-size: 12px; }
+.card.mini .v { font-size: 26px; margin-top: 4px; }
+.card.mini .v small { font-size: 13px; margin-left: 3px; }
+.hist { display: grid; grid-template-columns: 1fr 250px; gap: 24px; margin-top: 18px; }
+.hist h4 { font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+.hist h4 .muted { font-weight: 400; font-size: 14px; margin-left: 6px; }
+.hist .tk-list { margin-top: 4px; max-height: 38vh; }
+.hist th { padding: 6px 10px; }
+.hist td { padding: 8px 10px; font-size: 14px; }
 
 /* help bubble: a small "?" next to a title, the explanation shows on hover or keyboard focus */
 .help { position: relative; top: -6px; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-left: 16px; border: 2px solid var(--stone); border-radius: 9999px; color: var(--mute); font: 500 16px/1 var(--text); letter-spacing: 0; text-transform: none; vertical-align: middle; cursor: help; }
 .help:hover, .help:focus-visible { border-color: var(--ink); color: var(--ink); outline: none; }
 .help .tip { position: absolute; z-index: 30; top: calc(100% + 12px); left: 50%; transform: translateX(-50%); width: 320px; padding: 14px 18px; border-radius: 20px; background: var(--ink); color: #fff; font: 400 14px/1.45 var(--text); text-align: left; letter-spacing: 0; text-transform: none; opacity: 0; visibility: hidden; transition: opacity .12s; pointer-events: none; }
 .help:hover .tip, .help:focus-visible .tip { opacity: 1; visibility: visible; }
+/* in a form label: a smaller bubble; the tip opens below, centred, so it stays inside a scrolling dialog */
+.help.sm { top: -1px; width: 18px; height: 18px; margin-left: 8px; border-width: 1.5px; font-size: 11px; }
+.help.sm .tip { width: 300px; padding: 10px 14px; font-size: 13px; }
 
 /* status */
 .pill { white-space: nowrap; flex: none; display: inline-block; padding: 3px 12px; border-radius: 9999px; font-size: 12px; font-weight: 500; background: var(--cloud); }
@@ -101,7 +136,7 @@ button.pill { border: 0; font: inherit; font-size: 12px; font-weight: 500; curso
 .scan { font: 500 40px var(--display); height: 80px; text-transform: uppercase; padding: 0 32px; border-radius: 9999px; }
 #sugg { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .sugg { all: unset; cursor: pointer; display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: var(--cloud); border-radius: 9999px; }
-.sugg:hover, .sugg:focus-visible { background: var(--hairline-soft); }
+.sugg:hover, .sugg:focus-visible, .sugg.hi { background: var(--hairline-soft); } /* .hi = chosen with the arrow keys */
 .sugg .muted { margin-left: auto; }
 .result { margin-top: 20px; border-radius: 24px; padding: 28px 32px; color: #fff; display: flex; justify-content: space-between; align-items: center; }
 .result.ok { background: var(--success); } .result.bad { background: var(--sale); }
@@ -228,10 +263,17 @@ dialog .row { margin-top: 24px; justify-content: flex-end; }
 dialog h3 { padding-right: 32px; } /* room for the X (36px wide, 22px from the edge, 26px into the content box) */
 dialog .x { all: unset; box-sizing: border-box; cursor: pointer; position: absolute; top: 22px; right: 22px; width: 36px; height: 36px; border-radius: 9999px; display: grid; place-items: center; color: var(--ink); }
 dialog .x:hover, dialog .x:focus-visible { background: var(--cloud); }
-/* member dialog footer: reversible actions left, hard delete alone on the next line, right */
-dialog .zone { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--hairline-soft); }
+/* member dialog: group titles (Identité / Abonnement), the end date with the pause button beside it, notes under a field */
+dialog .grp { margin: 18px 4px 0; font-size: 12px; font-weight: 500; letter-spacing: .8px; text-transform: uppercase; color: var(--mute); }
+dialog .grp + label { margin-top: 6px; }
+dialog.tall label { margin-top: 10px; } /* the edit form has 4 fields + header + footer: tighter, so it fits an 820px window without scrolling */
+dialog .row.fin { margin-top: 0; justify-content: flex-start; flex-wrap: nowrap; }
+dialog .row.fin input { flex: 1; width: auto; min-width: 0; }
+dialog .note { margin: 8px 4px 0; font-size: 13px; }
+/* member dialog footer: rare actions left, the hard delete pushed right (wraps to its own line, still right, when the row is too narrow) */
+dialog .zone { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hairline-soft); }
 dialog .zone .row { margin-top: 0; justify-content: flex-start; }
-dialog .zone .row.del { margin-top: 12px; justify-content: flex-end; }
-dialog .zone p { margin: 10px 4px 0; font-size: 14px; }
+dialog .zone .danger { margin-left: auto; }
+dialog.tall { max-height: calc(100vh - 40px); overflow-y: auto; }
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 12px 24px; border-radius: 9999px; font-weight: 500; opacity: 0; transition: opacity .2s; pointer-events: none; }
 #toast.show { opacity: 1; }

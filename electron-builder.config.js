@@ -12,8 +12,8 @@ module.exports = {
   productName,
   directories: { output: 'dist' },
   // only the app itself is packed: never demo-data.js, the .bat files or the sample CSV
-  files: ['main.js', 'preload.js', 'xlsx.js', 'config.js', 'app.js', 'index.html', 'style.css', 'package.json'],
-  win: { target: 'nsis' },
+  files: ['main.js', 'preload.js', 'xlsx.js', 'config.js', 'app.js', 'index.html', 'style.css', 'package.json', 'build/icon.ico'],
+  win: { target: 'nsis', icon: 'build/icon.ico' }, // exe, installer and shortcut icon (256px and smaller inside); replace the file to rebrand
   nsis: {
     oneClick: false,
     perMachine: false,

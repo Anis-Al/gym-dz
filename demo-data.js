@@ -31,7 +31,7 @@ module.exports = function seedDemo(db, { today, addDays }) {
   const insVers = db.prepare('INSERT INTO versements(payment_id,member_id,montant,date) VALUES(?,?,?,?)');
   const setPause = db.prepare('UPDATE members SET fin=?, gel_debut=?, gel_fin=? WHERE id=?');
   const insCheck = db.prepare('INSERT INTO checkins(member_id,ts,day) VALUES(?,?,?)');
-  const N = 70;
+  const N = 35; // members (was 70 until 2026-10-25: too much to scroll through in a demo)
   for (let i = 0; i < N; i++) {
     let nom;
     do { nom = `${pick(firsts)} ${pick(lasts)}`; } while (used.has(nom));
@@ -77,7 +77,7 @@ module.exports = function seedDemo(db, { today, addDays }) {
     SELECT m.id FROM members m WHERE m.fin < ? AND NOT EXISTS (
       SELECT 1 FROM payments y WHERE y.member_id = m.id
         AND COALESCE(y.prix, y.montant) - y.montant - COALESCE((SELECT SUM(v.montant) FROM versements v WHERE v.payment_id = y.id), 0) > 0)
-    ORDER BY m.fin LIMIT 4)`).run(addDays(T, -2), addDays(T, -60));
+    ORDER BY m.fin LIMIT 2)`).run(addDays(T, -2), addDays(T, -60));
 
   // ---- memberships on pause: some right now (end date already pushed forward), some planned
   db.prepare('SELECT id, fin FROM members WHERE fin >= ? AND fin <= ?').all(addDays(T, 20), addDays(T, 200)).forEach((m, i) => {
@@ -88,27 +88,26 @@ module.exports = function seedDemo(db, { today, addDays }) {
 
   // ---- products (stock in base units: bottle = doses units)
   const insProd = db.prepare('INSERT INTO products(nom,prix,doses,prix_dose,stock,categorie) VALUES(?,?,?,?,?,?)');
+  // 14 products across the four categories, with one out of stock and a few nearly empty (was 24 until 2026-10-25)
   const P = [
-    ['Eau 0,5L', 30, 1, null, 96], ['Eau 1,5L', 50, 1, null, 48], ['Jus', 80, 1, null, 36], ['Soda', 70, 1, null, 24],
-    ['Boisson énergisante', 250, 1, null, 3], ['Boisson isotonique', 180, 1, null, 18], ['Café', 60, 1, null, 0], ['Barre protéinée', 300, 1, null, 22],
-    ['Barre énergétique', 150, 1, null, 4], ['Shaker', 500, 1, null, 12], ['Serviette', 700, 1, null, 9], ['Gants de musculation', 1200, 1, null, 6],
-    ['Ceinture lombaire', 2500, 1, null, 2], ['Corde à sauter', 900, 1, null, 7], ['Bandes de poignet', 600, 1, null, 0],
-    ['Whey 2kg', 9500, 60, 250, 5 * 60 + 17], ['Whey 900g', 5000, 30, 200, 4 * 30], ['Créatine 300g', 4500, 60, 120, 6 * 60 + 9],
-    ['BCAA 400g', 5000, 40, 200, 40 + 12], ['Pré-workout 300g', 5500, 30, 300, 15], ['Gainer 3kg', 8000, 30, 350, 3 * 30 + 21],
-    ['Glutamine 300g', 4800, 60, 130, 2 * 60], ['Oméga 3 (90 caps)', 3200, 1, null, 8], ['Multivitamines', 2800, 1, null, 11],
+    ['Eau 0,5L', 30, 1, null, 96], ['Eau 1,5L', 50, 1, null, 48], ['Jus', 80, 1, null, 36],
+    ['Boisson énergisante', 250, 1, null, 3], ['Café', 60, 1, null, 0], ['Barre protéinée', 300, 1, null, 22],
+    ['Shaker', 500, 1, null, 12], ['Serviette', 700, 1, null, 9], ['Gants de musculation', 1200, 1, null, 6], ['Ceinture lombaire', 2500, 1, null, 2],
+    ['Whey 2kg', 9500, 60, 250, 5 * 60 + 17], ['Créatine 300g', 4500, 60, 120, 6 * 60 + 9], ['Pré-workout 300g', 5500, 30, 300, 15],
+    ['Multivitamines', 2800, 1, null, 11],
   ];
   const cat = (n) => (/^(Eau|Jus|Soda|Boisson|Café)/.test(n) ? 'Boissons' : /^Barre/.test(n) ? 'Snacks' : /^(Shaker|Serviette|Gants|Ceinture|Corde|Bandes)/.test(n) ? 'Accessoires' : 'Compléments');
   P.forEach((p) => insProd.run(...p, cat(p[0])));
   const prods = db.prepare('SELECT * FROM products').all();
 
-  // ---- sales: ~45 days of history, cheap items much more often than supplements
+  // ---- sales: 30 days of history, cheap items much more often than supplements
   // each day = a few tickets of 1 to 3 lines (cheap items can be bought several at once)
   const insSale = db.prepare('INSERT INTO sales(product_id,nom,qty,dose,montant,date,ts,ticket) VALUES(?,?,?,?,?,?,?,?)');
   const weight = (p) => (p.prix <= 100 ? 10 : p.prix <= 400 ? 4 : p.prix <= 1500 ? 1.2 : 0.8);
   const pool = prods.flatMap((p) => Array(Math.round(weight(p) * 2)).fill(p));
   let ticket = 0;
-  for (let off = 44; off >= 0; off--) {
-    const day = addDays(T, -off), n = off === 0 ? int(5, 8) : int(3, 10);
+  for (let off = 29; off >= 0; off--) {
+    const day = addDays(T, -off), n = off === 0 ? int(3, 5) : int(2, 6);
     for (let s = 0; s < n; s++) {
       ticket++;
       const ts = `${day}T${p2(int(7, 21))}:${p2(int(0, 59))}:00.000Z`, lines = 1 + (rnd() < 0.4 ? int(1, 2) : 0);

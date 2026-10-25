@@ -18,6 +18,15 @@ function status(m) {
   return ['ok', 'Actif'];
 }
 const pill = (m) => { const [c, l] = status(m); return `<span class="pill ${c}">${l}</span>`; };
+const INACTIF_J = 14; // same as main.js: a valid member with no check-in for this many days is "inactif"
+const minus = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return iso(d); };
+// phone number as a link: opens a WhatsApp chat (reminder text prefilled when the subscription ends within 7 days or has ended)
+const telLink = (m) => (m.tel ? `<button type="button" class="lnk" data-wa="${m.id}" title="Écrire sur WhatsApp">${esc(m.tel)}</button>` : '');
+const waText = (m) => (m.fin && m.fin <= plus7() ? `Bonjour ${m.nom}, votre abonnement à ${APP.name} ${m.fin < todayStr() ? 'a expiré le' : 'expire le'} ${fdate(m.fin)}. Pensez à le renouveler. À bientôt !` : '');
+// member avatar: the photo when there is one (photos = id -> data URL, fetched for the rows on screen), else the first letter on grey
+const avatar = (m, photos, cls = '') => (photos?.[m.id] ? `<img class="av ${cls}" src="${photos[m.id]}" alt="">` : `<span class="av ${cls}" aria-hidden="true">${esc((m.nom || '?').trim()[0]?.toUpperCase() ?? '?')}</span>`);
+const fetchPhotos = (list) => { const ids = list.filter((m) => m.a_photo).map((m) => m.id); return ids.length ? api.photos(ids) : {}; };
+const bindWa = (root, find) => root.querySelectorAll('[data-wa]').forEach((b) => b.onclick = guard(async () => { const m = find(+b.dataset.wa); await api.whatsapp(m.tel, waText(m)); }));
 
 let toastT;
 function toast(msg, ms = 2200) {
@@ -38,7 +47,7 @@ function fail(e) {
 }
 const guard = (fn) => async (...a) => { try { await fn(...a); } catch (e) { fail(e); } };
 
-function modal(html, onSubmit, { wide = false } = {}) {
+function modal(html, onSubmit, { wide = false, tall = false } = {}) {
   dlg.innerHTML = `<form method="dialog">${html}<button type="button" class="x" aria-label="Fermer" title="Fermer"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></form>`;
   const f = dlg.firstElementChild;
   f.querySelector(".x").onclick = () => dlg.close(); // same as Esc; type=button so Enter in a field never hits it; last in the DOM so showModal() still focuses the first field
@@ -51,8 +60,10 @@ function modal(html, onSubmit, { wide = false } = {}) {
     await onSubmit(Object.fromEntries(new FormData(f)));
     dlg.close();
   }));
-  dlg.classList.toggle('wide', wide); // only the delivery dialog is wide
+  dlg.classList.toggle('wide', wide); // delivery, history: 880px
+  dlg.classList.toggle('tall', tall); // member edit: scrolls instead of overflowing a short window (dialogs with a dropdown must stay overflow: visible)
   dlg.showModal();
+  if (document.activeElement?.classList.contains('help')) document.activeElement.blur(); // a "?" as first focusable would open its tooltip at once
 }
 const planOpts = (plans) => plans.map((p) => ({ v: p.id, l: p.nom, sub: `${da(p.prix)} · ${p.jours} j${p.seances_sem ? ` · ${p.seances_sem}/sem` : ''}` }));
 const DAYS_FR = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
@@ -99,8 +110,9 @@ function initDd(el) {
   el.addEventListener('focusout', (e) => { if (!el.contains(e.relatedTarget)) close(); });
 }
 const btns = (ok = 'Enregistrer') => `<div class="row"><button class="btn alt" value="cancel" formnovalidate>Annuler</button><button class="btn">${ok}</button></div>`;
-// small "?" bubble to put inside a title: the text shows on hover or keyboard focus
-const help = (text) => `<span class="help" tabindex="0" role="note" aria-label="${esc(text)}">?<span class="tip" aria-hidden="true">${esc(text)}</span></span>`;
+// small "?" bubble to put inside a title (or a form label with cls 'sm'): the text shows on hover or keyboard focus
+const help = (text, cls = '') => `<span class="help ${cls}" tabindex="0" role="note" aria-label="${esc(text)}">?<span class="tip" aria-hidden="true">${esc(text)}</span></span>`;
+const HELP_VERSE = 'Vide = prix complet. Plus bas que le prix : le reste est noté en dette. La période commence à la fin actuelle (aujourd\'hui si expiré).';
 
 // Caisse = two tabs: today's cash summary / payments history
 const caisseTabs = (on, extra = '') => `<div class="row noprint" style="margin-bottom:20px">${[['caisse', 'Aujourd\'hui'], ['pay', 'Historique des paiements']].map(([k, l]) => `<button class="chip ${on === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}${extra ? `<div class="row end">${extra}</div>` : ''}</div>`;
@@ -132,17 +144,19 @@ const pages = {
   async dash() {
     const s = await api.stats();
     const st = pages.dash.state ??= { p: 0 };
+    // row 1 = money, row 2 = members (each card opens Membres on the matching filter)
     view.innerHTML = `<h1>Tableau de bord</h1>
-      <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="grid">
         <div class="card dark" data-go="caisse" role="button" tabindex="0"><div class="k">Revenu du mois</div><div class="v">${s.revenuMois.toLocaleString('fr-DZ')}<small>DA</small></div></div>
         <div class="card" data-go="caisse" role="button" tabindex="0"><div class="k">Revenu aujourd'hui</div><div class="v">${s.revenuJour.toLocaleString('fr-DZ')}<small>DA</small></div></div>
         <div class="card" data-go="shop" role="button" tabindex="0"><div class="k">Ventes boutique (mois)</div><div class="v">${s.ventesMois.toLocaleString('fr-DZ')}<small>DA</small></div></div>
+        <div class="card" data-go="members" data-f="dette" role="button" tabindex="0"><div class="k">Impayés · ${da(s.dettes.total)}</div><div class="v">${s.dettes.n}</div></div>
       </div>
       <div class="grid" style="margin-top:16px">
         <div class="card" data-go="members" data-f="actif" role="button" tabindex="0"><div class="k">Membres actifs</div><div class="v">${s.actifs}</div></div>
         <div class="card" data-go="members" data-f="soon" role="button" tabindex="0"><div class="k">Expirent sous 7 jours</div><div class="v">${s.expirent}</div></div>
         <div class="card" data-go="members" data-f="exp" role="button" tabindex="0"><div class="k">Abonnements expirés</div><div class="v" style="color:var(--sale)">${s.expires}</div></div>
-        <div class="card" data-go="members" data-f="dette" role="button" tabindex="0"><div class="k">Impayés · ${da(s.dettes.total)}</div><div class="v">${s.dettes.n}</div></div>
+        <div class="card" data-go="members" data-f="inactif" role="button" tabindex="0"><div class="k">Inactifs depuis ${INACTIF_J} j</div><div class="v">${s.inactifs}</div></div>
       </div>
       <h2>À renouveler</h2><div id="renew"></div>`;
     // paged list, latest end date first (about to expire, then the most recently expired)
@@ -150,10 +164,11 @@ const pages = {
       const list = s.aRenouveler;
       st.p = Math.min(st.p, Math.max(0, Math.ceil(list.length / PER) - 1));
       $('#renew').innerHTML = list.length ? `<table><tr><th>Membre</th><th>Téléphone</th><th>Fin</th><th></th></tr>${list.slice(st.p * PER, (st.p + 1) * PER).map((m) => `
-        <tr><td>${esc(m.nom)}</td><td>${esc(m.tel)}</td><td>${fdate(m.fin)}</td>
+        <tr><td>${esc(m.nom)}</td><td>${telLink(m)}</td><td>${fdate(m.fin)}</td>
         <td class="acts"><button class="btn sm" data-renew="${m.id}">Renouveler</button></td></tr>`).join('')}</table>${pagerHtml(list.length, st.p)}`
         : '<div class="empty">Aucun abonnement à renouveler.</div>';
       $('#renew').querySelectorAll('[data-renew]').forEach((b) => b.onclick = () => renewDialog(+b.dataset.renew, 'dash'));
+      bindWa($('#renew'), (id) => list.find((m) => m.id === id));
       bindPager((p) => { st.p = p; drawRenew(); });
     };
     drawRenew();
@@ -168,23 +183,28 @@ const pages = {
   async members() {
     const state = pages.members.state ??= { q: '', f: 'all', p: 0 };
     const all = await api.members(state.q);
-    const t = todayStr(), w = plus7();
-    const F = { all: () => true, actif: (m) => m.fin >= t, soon: (m) => m.fin >= t && m.fin <= w, exp: (m) => !m.fin || m.fin < t, dette: (m) => m.dette > 0, archive: () => true };
+    const t = todayStr(), w = plus7(), d14 = minus(INACTIF_J);
+    const F = { all: () => true, actif: (m) => m.fin >= t, soon: (m) => m.fin >= t && m.fin <= w, exp: (m) => !m.fin || m.fin < t, dette: (m) => m.dette > 0,
+      inactif: (m) => m.fin >= t && (!m.derniere || m.derniere < d14), archive: () => true };
     // archived members only appear in their own view; every other view and count ignores them
     const pool = (k) => all.filter((m) => (k === 'archive') === !!m.archive_le);
     const list = pool(state.f).filter(F[state.f]);
     state.p = Math.min(state.p, Math.max(0, Math.ceil(list.length / PER) - 1));
+    const shown = list.slice(state.p * PER, (state.p + 1) * PER), photos = await fetchPhotos(shown);
+    // what a filter means goes in the chip's tooltip; the Expirés view also carries the bulk-archive control (months input + button)
+    const titles = { archive: 'Hors des listes et des statistiques, ne peuvent plus entrer. Paiements conservés.', inactif: `Abonnement valide mais aucune entrée depuis ${INACTIF_J} jours (ou jamais) : à relancer.` };
+    const hints = { exp: list.length ? `<span class="row" style="gap:8px">Expirés depuis plus de <input id="oldm" type="number" min="1" max="60" step="1" value="${state.mois ?? 3}" style="width:76px;padding:4px 12px" aria-label="Mois"> mois : <button class="btn sm alt" id="arcold">Archiver…</button></span>` : '' };
     view.innerHTML = `<h1>Membres</h1>
       <div class="row" style="margin-bottom:16px">
         <input class="search" id="q" placeholder="Nom, téléphone ou n° membre" value="${esc(state.q)}">
         <div class="row end"><button class="btn alt" id="imp">Importer</button><button class="btn" id="add">+ Nouveau membre</button></div>
       </div>
       <div class="row" style="margin-bottom:20px">
-        ${[['all', 'Tous'], ['actif', 'Actifs'], ['soon', 'Bientôt'], ['exp', 'Expirés'], ['dette', 'Impayés'], ['archive', 'Archivés']].map(([k, l]) => `<button class="chip ${state.f === k ? 'on' : ''}" data-f="${k}">${l} ${pool(k).filter(F[k]).length}</button>`).join('')}
-        ${state.f === 'archive' ? '<p class="muted" style="flex-basis:100%;margin:4px 4px 0;font-size:14px">Les membres archivés ne comptent pas dans les statistiques et ne peuvent plus entrer. Leurs paiements sont conservés.</p>' : ''}
+        ${[['all', 'Tous'], ['actif', 'Actifs'], ['soon', 'Bientôt'], ['exp', 'Expirés'], ['dette', 'Impayés'], ['inactif', 'Inactifs'], ['archive', 'Archivés']].map(([k, l]) => `<button class="chip ${state.f === k ? 'on' : ''}" data-f="${k}"${titles[k] ? ` title="${esc(titles[k])}"` : ''}>${l} ${pool(k).filter(F[k]).length}</button>`).join('')}
+        ${hints[state.f] ? `<p class="muted" style="flex-basis:100%;margin:4px 4px 0;font-size:14px">${hints[state.f]}</p>` : ''}
       </div>
-      ${list.length ? `<table><tr><th>N°</th><th>Nom</th><th>Téléphone</th><th>Abonnement</th><th>Fin</th><th>Statut</th><th></th></tr>${list.slice(state.p * PER, (state.p + 1) * PER).map((m) => `
-        <tr><td class="muted">${m.id}</td><td><b>${esc(m.nom)}</b></td><td>${esc(m.tel)}</td><td class="wrap">${esc(m.plan) || '—'}</td><td>${fdate(m.fin)}</td><td class="wrap">${pill(m)}${m.dette > 0 ? ` <button class="pill bad" data-settle="${m.id}" title="Encaisser">Doit ${da(m.dette)}</button>` : ''}</td>
+      ${list.length ? `<table><tr><th>N°</th><th>Nom</th><th>Téléphone</th><th>Abonnement</th><th>Fin</th><th>Statut</th><th></th></tr>${shown.map((m) => `
+        <tr><td class="muted">${m.id}</td><td><div class="nm">${avatar(m, photos)}<button type="button" class="lnk" data-hist="${m.id}" title="Historique"><b>${esc(m.nom)}</b></button></div></td><td>${telLink(m)}</td><td class="wrap">${esc(m.plan) || '—'}</td><td>${fdate(m.fin)}</td><td>${pill(m)}</td>
         <td class="acts">${m.archive_le
           ? `<button class="btn sm" data-unarchive="${m.id}">Réactiver</button>`
           : `<button class="btn sm ${status(m)[0] === 'ok' ? 'alt' : ''}" data-renew="${m.id}">Renouveler</button>`}<button class="btn sm alt" data-edit="${m.id}">Modifier</button></td></tr>`).join('')}</table>${pagerHtml(list.length, state.p)}`
@@ -195,32 +215,50 @@ const pages = {
     view.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { state.f = b.dataset.f; state.p = 0; pages.members(); });
     $('#add').onclick = () => memberDialog();
     $('#imp').onclick = () => importDialog('members');
+    view.querySelectorAll('[data-hist]').forEach((b) => b.onclick = () => historyDialog(+b.dataset.hist));
+    bindWa(view, (id) => all.find((m) => m.id === id));
+    $('#oldm')?.addEventListener('input', (e) => { state.mois = e.target.value; });
+    $('#arcold')?.addEventListener('click', guard(async () => {
+      const mois = Math.round(Number($('#oldm').value));
+      const r = await api.archiveOld(mois, true);
+      if (!r.n) return toast(!r.dettes ? 'Aucun membre expiré depuis si longtemps' : r.dettes > 1 ? `Aucun : les ${r.dettes} concernés doivent encore de l'argent` : 'Aucun : le seul concerné doit encore de l\'argent', 4000);
+      modal(`<h3>Archiver ${r.n} membre${r.n > 1 ? 's' : ''} ?</h3><p class="muted" style="margin-top:12px">Abonnement terminé depuis plus de ${mois} mois (ou jamais abonné). Ils quittent les listes et les statistiques ; leurs paiements restent.</p>${r.dettes ? `<p style="margin-top:12px"><b>${r.dettes} ignoré${r.dettes > 1 ? 's' : ''}</b> : encore de l'argent dû.</p>` : ''}${btns('Archiver')}`,
+        async () => { const d = await api.archiveOld(mois); toast(`${d.n} membre${d.n > 1 ? 's' : ''} archivé${d.n > 1 ? 's' : ''}`, 4000); pages.members(); });
+    }));
     view.querySelectorAll('[data-renew]').forEach((b) => b.onclick = () => renewDialog(+b.dataset.renew, 'members'));
-    view.querySelectorAll('[data-settle]').forEach((b) => b.onclick = () => settleDialog(all.find((m) => m.id == b.dataset.settle), 'members'));
     view.querySelectorAll('[data-unarchive]').forEach((b) => b.onclick = guard(async () => { await api.unarchiveMember(+b.dataset.unarchive); toast('Membre réactivé'); pages.members(); }));
     view.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => memberDialog(all.find((m) => m.id == b.dataset.edit)));
   },
 
   async checkin() {
-    view.innerHTML = `<h1>Entrées${help('Sélectionnez un membre pour enregistrer sa présence : tapez son n° ou son nom, puis cliquez sur son nom.')}</h1>
+    view.innerHTML = `<h1>Entrées${help('Tapez le n° ou le nom du membre, puis Entrée (ou cliquez sur son nom).')}</h1>
       <input class="scan" id="scan" placeholder="N° membre ou nom" autofocus autocomplete="off">
       <div id="sugg"></div><div id="res"></div><h2>Aujourd'hui <span class="muted" id="cnt"></span></h2><div id="today"></div>`;
     let rows = [], page = 0; // today's check-ins, newest first
     const drawToday = () => {
       page = Math.min(page, Math.max(0, Math.ceil(rows.length / PER) - 1));
       $('#cnt').textContent = rows.length ? `(${rows.length})` : '';
-      $('#today').innerHTML = rows.length ? `<table>${rows.slice(page * PER, (page + 1) * PER).map((r) => `<tr><td class="muted" style="width:90px">${new Date(r.ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</td><td><b>${esc(r.nom)}</b></td><td class="muted num">N° ${r.id}</td></tr>`).join('')}</table>${pagerHtml(rows.length, page)}` : '<div class="empty" style="padding:20px">Aucune entrée pour le moment.</div>';
+      $('#today').innerHTML = rows.length ? `<table>${rows.slice(page * PER, (page + 1) * PER).map((r) => `<tr><td class="muted" style="width:90px">${new Date(r.ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</td><td><b>${esc(r.nom)}</b></td><td class="muted num">N° ${r.id}</td><td class="acts"><button type="button" class="chip" data-undo="${r.id}" title="Retirer cette entrée (mauvaise personne)">Annuler</button></td></tr>`).join('')}</table>${pagerHtml(rows.length, page)}` : '<div class="empty" style="padding:20px">Aucune entrée pour le moment.</div>';
       bindPager((p) => { page = p; drawToday(); $('#scan').focus(); }); // keep the scan field ready
+      $('#today').querySelectorAll('[data-undo]').forEach((b) => b.onclick = () => undo(+b.dataset.undo, rows.find((r) => r.id === +b.dataset.undo)?.nom ?? ''));
     };
     const renderToday = async () => { rows = await api.checkinsToday(); drawToday(); };
     renderToday();
     const scan = $('#scan'), sugg = $('#sugg');
     scan.focus();
-    let timer, bannerT;
+    let timer, bannerT, hi = -1; // hi = keyboard-highlighted suggestion
+    // wrong person checked in: after a confirmation, remove today's row (it also counted against the weekly limit)
+    const undo = (id, nom) => modal(`<h3>Annuler l'entrée ?</h3><p class="muted" style="margin-top:12px">${esc(nom)} — l'entrée d'aujourd'hui est retirée et ne compte plus dans la semaine.</p>${btns("Retirer l'entrée")}`,
+      async () => {
+        await api.uncheckin(id);
+        $('#res').innerHTML = ''; toast('Entrée annulée'); renderToday();
+        setTimeout(() => $('#scan')?.focus(), 50); // once the dialog has closed (focus is blocked while it is open)
+      });
     const enter = async (id) => {
       clearTimeout(timer);
       const r = await api.checkin(id);
       const name = r.member ? esc(r.member.nom) : '';
+      const face = r.member ? avatar(r.member, { [r.member.id]: r.member.photo }, 's88') : '';
       const left = r.member?.fin ? Math.round((new Date(r.member.fin + 'T00:00:00') - new Date(todayStr() + 'T00:00:00')) / 864e5) : -1;
       const soon = r.ok && left <= 7 ? (left === 0 ? 'Expire aujourd\'hui' : `Expire dans ${left} jour${left > 1 ? 's' : ''}`) : '';
       const msg = r.ok ? (r.deja ? 'Déjà enregistré aujourd\'hui' : 'Entrée enregistrée') : esc(r.motif);
@@ -230,29 +268,37 @@ const pages = {
       const renew = r.member && ((!r.ok && r.code === 'expire') || soon) ? `<button class="btn alt" id="rn">Renouveler</button>` : '';
       const due = r.member?.dette > 0 ? `<div><strong>Reste à payer : ${da(r.member.dette)}</strong></div>` : '';
       const settle = due ? `<button class="btn alt" id="sd">Encaisser</button>` : '';
-      $('#res').innerHTML = `<div class="result ${r.ok ? 'ok' : 'bad'}"><div><b>${r.ok ? 'Bienvenue' : 'Accès refusé'}</b><div>${name}${r.member ? ` — fin ${fdate(r.member.fin)}` : ''}</div></div><div style="text-align:right">${msg}${soon ? `<div><strong>${soon}</strong></div>` : ''}${week}${due}${renew || settle ? `<div class="row" style="justify-content:flex-end;margin-top:12px">${renew}${settle}</div>` : ''}</div></div>`;
+      const undoBtn = r.ok ? `<button class="btn alt" id="undo">Annuler l'entrée</button>` : '';
+      $('#res').innerHTML = `<div class="result ${r.ok ? 'ok' : 'bad'}"><div class="who">${face}<div><b>${r.ok ? 'Bienvenue' : 'Accès refusé'}</b><div>${name}${r.member ? ` — fin ${fdate(r.member.fin)}` : ''}</div></div></div><div style="text-align:right">${msg}${soon ? `<div><strong>${soon}</strong></div>` : ''}${week}${due}${renew || settle || undoBtn ? `<div class="row" style="justify-content:flex-end;margin-top:12px">${renew}${settle}${undoBtn}</div>` : ''}</div></div>`;
       if (renew) $('#rn').onclick = () => renewDialog(id, () => enter(id)); // after paying, check the member in
       if (settle) $('#sd').onclick = () => settleDialog(r.member, () => enter(id));
+      if (undoBtn) $('#undo').onclick = () => undo(id, r.member.nom);
       // clear the banner so it never looks like the current person; keep it longer when it carries a Renouveler button
       clearTimeout(bannerT);
       bannerT = setTimeout(() => { const el = $('#res'); if (el) el.innerHTML = ''; }, r.ok && !soon ? 6000 : 15000);
       if (r.ok && !r.deja) page = 0; // a new arrival shows on the first page
-      scan.value = ''; sugg.innerHTML = ''; renderToday(); scan.focus();
+      scan.value = ''; sugg.innerHTML = ''; hi = -1; renderToday(); scan.focus();
     };
-    // live suggestions: name, phone or n°; click one to check in
+    // live suggestions: name, phone or n°; click one (or arrow down + Enter) to check in
+    const mark = (i) => { [...sugg.children].forEach((x, j) => x.classList.toggle('hi', j === i)); hi = i; };
     scan.oninput = () => {
-      clearTimeout(timer);
+      clearTimeout(timer); hi = -1;
       timer = setTimeout(guard(async () => {
         const v = scan.value.trim();
         if (!v) { sugg.innerHTML = ''; return; }
-        const hits = (await api.members(v)).filter((m) => !m.archive_le).slice(0, 6);
+        const hits = (await api.members(v)).filter((m) => !m.archive_le).slice(0, 6), photos = await fetchPhotos(hits);
         if (scan.value.trim() !== v) return;
-        sugg.innerHTML = hits.map((m) => `<button class="sugg" data-id="${m.id}"><b>${esc(m.nom)}</b><span class="muted">${esc(m.tel)} · N° ${m.id}</span>${pill(m)}</button>`).join('');
+        sugg.innerHTML = hits.map((m) => `<button class="sugg" data-id="${m.id}">${avatar(m, photos)}<b>${esc(m.nom)}</b><span class="muted">${esc(m.tel)} · N° ${m.id}</span>${pill(m)}</button>`).join('');
         sugg.querySelectorAll('[data-id]').forEach((b) => b.onclick = guard(() => enter(+b.dataset.id)));
       }), 150);
     };
     scan.onkeydown = guard(async (e) => {
+      const n = sugg.children.length;
+      if (e.key === 'ArrowDown' && n) { e.preventDefault(); return mark(Math.min(hi + 1, n - 1)); }
+      if (e.key === 'ArrowUp' && n) { e.preventDefault(); return mark(Math.max(hi - 1, 0)); }
+      if (e.key === 'Escape') { scan.value = ''; sugg.innerHTML = ''; hi = -1; return; }
       if (e.key !== 'Enter' || !scan.value.trim()) return;
+      if (hi >= 0 && sugg.children[hi]) return enter(+sugg.children[hi].dataset.id);
       const v = scan.value.trim(), found = await api.members(v), hits = found.filter((m) => !m.archive_le);
       const hit = found.find((m) => String(m.id) === v) ?? (hits.length === 1 ? hits[0] : null); // an exact n° also finds an archived member, to show why they cannot enter
       if (!hit) { toast(hits.length ? `${hits.length} résultats — choisissez dans la liste` : found.length ? 'Membre archivé — réactivez-le dans Membres' : 'Aucun membre trouvé'); return; }
@@ -286,7 +332,7 @@ const pages = {
     const tAbos = sum(abos), tVentes = sum(c.ventes);
     const tbl = (rows, label) => (rows.length ? `<table><tr><th>${label}</th><th class="num">Nombre</th><th class="num">Total</th></tr>${rows.map((r) => `
       <tr><td><b>${esc(r.nom)}</b>${r.dose ? ' <span class="muted">(dose)</span>' : ''}</td><td class="num">${r.n}</td><td class="num">${da(r.total)}</td></tr>`).join('')}</table>` : '<div class="empty">Rien.</div>');
-    view.innerHTML = `<h1>Caisse</h1>${caisseTabs('caisse', `<input type="date" id="cd" value="${st.date}" style="width:auto"><button class="btn" id="print">Imprimer</button>`)}
+    view.innerHTML = `<h1>Caisse</h1>${caisseTabs('caisse', `<input type="date" id="cd" value="${st.date}" style="width:auto"><button class="btn alt" id="xls" title="Toutes les opérations du mois en Excel">Exporter le mois</button><button class="btn" id="print">Imprimer</button>`)}
       <p class="muted printonly">Caisse du ${fdate(st.date)}</p>
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
         <div class="card dark"><div class="k">Total du ${fdate(st.date)}</div><div class="v">${(tAbos + tVentes).toLocaleString('fr-DZ')}<small>DA</small></div></div>
@@ -298,6 +344,7 @@ const pages = {
     bindTabs();
     $('#cd').onchange =(e) => { if (e.target.value) { st.date = e.target.value; pages.caisse(); } };
     $('#print').onclick = () => window.print();
+    $('#xls').onclick = guard(async () => { if (await api.exportCaisse(st.date.slice(0, 7))) toast('Export enregistré'); });
   },
 
   // Point of sale: tap products to build the ticket on the right, enter the cash received, give the change, validate.
@@ -363,9 +410,10 @@ const pages = {
       view.querySelectorAll('[data-cat-chip]').forEach((c) => c.classList.toggle('on', c.dataset.catChip === st.cat));
       const box = $('#ptiles');
       if (!box) return;
-      const list = prods.filter((p) => norm(p.nom + ' ' + (p.categorie || '')).includes(norm(st.q)) && (!st.cat || (st.cat === '__none' ? !p.categorie : p.categorie === st.cat)));
+      const list = visible();
       box.innerHTML = list.length ? list.map(tile).join('') : '<div class="empty">Aucun produit ne correspond.</div>';
     };
+    const visible = () => prods.filter((p) => norm(p.nom + ' ' + (p.categorie || '') + ' ' + (p.code_barre || '')).includes(norm(st.q)) && (!st.cat || (st.cat === '__none' ? !p.categorie : p.categorie === st.cat)));
     const drawTicket = () => {
       const t = total(), raw = $('#tkrecu').value.trim(), recu = raw === '' ? null : Number(raw);
       const short = recu !== null && recu < t;
@@ -399,6 +447,16 @@ const pages = {
     };
 
     $('#q').oninput = (e) => { st.q = e.target.value; drawTiles(); };
+    // Enter = add the product whose barcode is the text typed (a USB scanner types the code then Enter), else the first tile shown; then clear the search
+    $('#q').onkeydown = (e) => {
+      if (e.key !== 'Enter') return;
+      const q = st.q.trim();
+      if (!q) return;
+      const p = prods.find((x) => x.code_barre && x.code_barre === q) ?? visible()[0];
+      if (!p) return toast('Aucun produit ne correspond');
+      st.q = ''; e.target.value = '';
+      add(p.id, false);
+    };
     view.querySelectorAll('[data-cat-chip]').forEach((c) => c.onclick = () => { st.cat = c.dataset.catChip; drawTiles(); });
     $('#ptiles')?.addEventListener('click', (e) => { const b = e.target.closest('[data-add]'); if (b && !b.disabled) add(+b.dataset.add, !!b.dataset.dose); });
     $('#tklines').addEventListener('click', (e) => {
@@ -446,7 +504,7 @@ const pages = {
       <div id="tbl"></div>`;
     // filters combine (search + stock status + category); chip counts follow the other active filters
     const catOf = (p) => p.categorie || '__none';
-    const matches = (p, skip) => (skip === 'q' || !norm(st.q) || norm(p.nom + ' ' + (p.categorie || '')).includes(norm(st.q)))
+    const matches = (p, skip) => (skip === 'q' || !norm(st.q) || norm(p.nom + ' ' + (p.categorie || '') + ' ' + (p.code_barre || '')).includes(norm(st.q)))
       && (skip === 's' || st.s === 'all' || stockState(p) === st.s) && (skip === 'c' || !st.cat || catOf(p) === st.cat);
     const draw = () => {
       const list = prods.filter((p) => matches(p));
@@ -458,7 +516,7 @@ const pages = {
         + (cats.length ? frow('Catégorie', [['', 'Toutes'], ...cats.map((c) => [c, c]), ...(prods.some((p) => !p.categorie) ? [['__none', 'Sans catégorie']] : [])]
           .map(([k, l]) => chip('cat', k, l, prods.filter((p) => matches(p, 'c') && (k === '' || catOf(p) === k)).length)).join('')) : '');
       $('#tbl').innerHTML = list.length ? `<table><tr><th>Produit</th><th>Catégorie</th><th class="num">Prix</th><th class="num">Prix dose</th><th>Stock</th><th></th></tr>${list.slice(st.p * PER_PRODUCTS, (st.p + 1) * PER_PRODUCTS).map((p) => `
-        <tr><td><b>${esc(p.nom)}</b></td><td class="muted">${esc(p.categorie) || '—'}</td><td class="num">${da(p.prix)}</td><td class="num">${p.doses > 1 ? da(p.prix_dose) : '—'}</td>
+        <tr><td><b>${esc(p.nom)}</b>${p.code_barre ? `<div class="sub">${esc(p.code_barre)}</div>` : ''}</td><td class="muted">${esc(p.categorie) || '—'}</td><td class="num">${da(p.prix)}</td><td class="num">${p.doses > 1 ? da(p.prix_dose) : '—'}</td>
         <td>${p.stock ? stock(p) + ' ' : ''}${stockPill(p)}</td>
         <td class="acts"><button class="btn sm alt" data-edit="${p.id}">Modifier</button></td></tr>`).join('')}</table>${pagerHtml(list.length, st.p, PER_PRODUCTS)}`
         : `<div class="empty">${prods.length ? 'Aucun produit ne correspond.' : 'Aucun produit. Ajoutez eau, boissons, compléments…'}</div>`;
@@ -473,15 +531,16 @@ const pages = {
       modal(`<h3>${p.id ? 'Modifier' : 'Nouveau'} produit</h3>
         <input type="hidden" name="id" value="${p.id ?? ''}">
         <label>Nom</label><input name="nom" required value="${esc(p.nom)}">
-        <label>Catégorie (optionnel)</label>${dd('categorie', [...new Set(prods.map((x) => x.categorie).filter(Boolean))].map((c) => ({ v: c, l: c })), p.categorie || '', { free: true, placeholder: 'ex. Boissons, Compléments' })}
+        <label>Catégorie</label>${dd('categorie', [...new Set(prods.map((x) => x.categorie).filter(Boolean))].map((c) => ({ v: c, l: c })), p.categorie || '', { free: true, placeholder: 'Optionnel — ex. Boissons' })}
+        <label>Code-barres</label><input name="code_barre" inputmode="numeric" autocomplete="off" placeholder="Optionnel — scannez ou tapez" value="${esc(p.code_barre)}">
         <label>Prix de l'unité (DA)</label><input name="prix" type="number" min="0" required value="${p.prix ?? ''}">
         ${p.id ? (p.doses > 1 ? `<label>Prix de la dose (DA)</label><input name="prix_dose" type="number" min="0" required value="${p.prix_dose}">` : '')
-          : `<label>Doses par unité (vide si pas vendu à la dose)</label><input name="doses" type="number" min="2" step="1" placeholder="ex. 30">
+          : `<label>Doses par unité${help('Produit aussi vendu à la dose (whey, créatine…) : nombre de doses dans une unité. Vide sinon.', 'sm')}</label><input name="doses" type="number" min="2" step="1" placeholder="Vide = vendu entier">
              <label>Prix de la dose (DA)</label><input name="prix_dose" type="number" min="0">
-             <label>Stock initial (unités)</label><input name="stock" type="number" min="0" step="1" value="0">`}
+             <label>Stock initial</label><input name="stock" type="number" min="0" step="1" placeholder="0 unité">`}
         ${btns()}${p.id ? '<button type="button" class="btn sm danger" id="del" style="margin-top:20px">Supprimer ce produit</button>' : ''}`,
         async (d) => {
-          await api.saveProduct({ id: d.id ? +d.id : null, nom: d.nom.trim(), prix: +d.prix, doses: d.doses ? +d.doses : 1, prix_dose: d.prix_dose ? +d.prix_dose : null, stock: +d.stock || 0, categorie: d.categorie });
+          await api.saveProduct({ id: d.id ? +d.id : null, nom: d.nom.trim(), prix: +d.prix, doses: d.doses ? +d.doses : 1, prix_dose: d.prix_dose ? +d.prix_dose : null, stock: +d.stock || 0, categorie: d.categorie, code_barre: d.code_barre });
           toast('Enregistré'); pages.products();
         });
       if (p.id) $('#del').onclick = () => {
@@ -498,7 +557,7 @@ const pages = {
   async plans() {
     const plans = await api.plans();
     view.innerHTML = `<h1>Formules</h1>
-      <div class="row" style="margin-bottom:20px"><p class="muted">Chaque formule a une durée, un prix et, si besoin, un maximum de séances par semaine.</p><div class="row end"><button class="btn" id="add">+ Nouvelle formule</button></div></div>
+      <div class="row" style="margin-bottom:20px;justify-content:flex-end"><button class="btn" id="add">+ Nouvelle formule</button></div>
       <table><tr><th>Nom</th><th class="num">Durée (jours)</th><th class="num">Séances / semaine</th><th class="num">Prix</th><th></th></tr>${plans.map((p) => `
         <tr><td><b>${esc(p.nom)}</b></td><td class="num">${p.jours}</td><td class="num">${p.seances_sem ?? '<span class="muted">Illimité</span>'}</td><td class="num">${da(p.prix)}</td><td class="acts"><button class="btn sm alt" data-edit="${p.id}">Modifier</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></td></tr>`).join('')}</table>`;
     view.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
@@ -510,8 +569,7 @@ const pages = {
       <input type="hidden" name="id" value="${p.id ?? ''}">
       <label>Nom</label><input name="nom" required value="${esc(p.nom)}">
       <label>Durée (jours)</label><input name="jours" type="number" min="1" required value="${p.jours ?? 30}">
-      <label>Séances par semaine (maximum)</label><input name="seances_sem" type="number" min="1" max="7" step="1" placeholder="Illimité" value="${p.seances_sem ?? ''}">
-      <p class="muted" style="margin:6px 4px 0;font-size:13px">Jours de présence autorisés par semaine (du ${DAYS_FR[APP.weekStart]} au ${DAYS_FR[(APP.weekStart + 6) % 7]}). Vide = illimité.</p>
+      <label>Séances par semaine${help(`Jours de présence autorisés par semaine (du ${DAYS_FR[APP.weekStart]} au ${DAYS_FR[(APP.weekStart + 6) % 7]}). Vide = illimité.`, 'sm')}</label><input name="seances_sem" type="number" min="1" max="7" step="1" placeholder="Illimité" value="${p.seances_sem ?? ''}">
       <label>Prix (DA)</label><input name="prix" type="number" min="0" step="1" required value="${p.prix ?? ''}">${btns()}`,
       async (d) => { await api.savePlan({ id: d.id ? +d.id : null, nom: d.nom.trim(), jours: +d.jours, prix: +d.prix, seances_sem: d.seances_sem === '' ? null : +d.seances_sem }); toast('Enregistré'); pages.plans(); });
     $('#add').onclick = () => dialog();
@@ -519,32 +577,47 @@ const pages = {
   },
 };
 
+// Member dialog, three zones: a header (photo, n°, status, photo buttons) in edit mode; the form in two groups, Identité then
+// Abonnement (end date with the pause button beside it, or formule + amount for a new member); under a hairline the rare actions
+// (Historique, Archiver / Réactiver) and the hard delete alone on its own line, right, as a red text button.
 async function memberDialog(m = {}) {
-  const plans = await api.plans();
+  const [plans, photos] = await Promise.all([api.plans(), m.id ? api.photos([m.id]) : {}]);
   const arch = !!m.archive_le;
   const paused = !arch && !!m.gel_fin && m.gel_fin >= todayStr(); // a pause in progress or planned
-  // below the form, under a hairline (.zone): reversible actions as small pills on the left (pause / archive, or reactivate),
-  // the hard delete alone on the next line, pushed right, as a red text button: never beside the benign ones, never wrapping mid-row
-  const actions = !m.id ? '' : `<div class="zone"><div class="row">${arch
-      ? '<button type="button" class="btn sm" id="unarch">Réactiver</button>'
-      : (paused ? '<button type="button" class="btn sm alt" id="gel">Reprendre maintenant</button>'
-        : m.fin >= todayStr() ? '<button type="button" class="btn sm alt" id="gel">Mettre en pause…</button>' : '') + '<button type="button" class="btn sm alt" id="arch">Archiver</button>'
-    }</div>${
-    paused ? `<p class="muted">Pause du ${fdate(m.gel_debut)} au ${fdate(m.gel_fin)}.</p>` : ''}${
-    arch ? `<p class="muted">Archivé le ${fdate(m.archive_le)} : hors des listes et des statistiques, il ne peut plus entrer.</p>` : ''}
-    <div class="row del"><button type="button" class="btn sm txt danger" id="del">Supprimer définitivement</button></div></div>`;
-  modal(`<h3>${m.id ? 'Modifier' : 'Nouveau'} membre</h3>
+  const head = !m.id ? '<h3>Nouveau membre</h3>' : `<div class="row hd">${avatar(m, photos, 's64')}<div><h3>Membre n° ${m.id}</h3>
+    <p class="muted">${m.fin ? `Fin ${fdate(m.fin)} ` : ''}${pill(m)}${m.dette > 0 ? ` <span class="pill bad">Doit ${da(m.dette)}</span>` : ''}</p>
+    <div class="row ph"><button type="button" class="btn sm alt" id="cam">Webcam</button><button type="button" class="btn sm alt" id="pick">Fichier…</button>${photos[m.id] ? '<button type="button" class="btn sm txt danger" id="rmph">Retirer</button>' : ''}</div></div></div>`;
+  const pauseBtn = arch ? '' : paused ? '<button type="button" class="btn sm alt" id="gel">Reprendre maintenant</button>'
+    : m.fin >= todayStr() ? '<button type="button" class="btn sm alt" id="gel">Mettre en pause…</button>' : '';
+  const abo = m.id
+    ? `<label>Fin d'abonnement${help("À corriger à la main seulement (jours offerts, erreur d'import) : un renouvellement la calcule tout seul.", 'sm')}</label>
+      <div class="row fin"><input name="fin" type="date" value="${esc(m.fin ?? '')}">${pauseBtn}</div>
+      ${paused ? `<p class="muted note">Pause du ${fdate(m.gel_debut)} au ${fdate(m.gel_fin)}.</p>` : ''}
+      ${arch ? `<p class="muted note">Archivé le ${fdate(m.archive_le)} : hors des listes, ne peut plus entrer.</p>` : ''}`
+    : `<label>Formule${help('Le paiement est enregistré aussitôt avec la formule choisie. « Aucun » : membre créé sans abonnement.', 'sm')}</label>${dd('plan_id', [{ v: '', l: "Aucun pour l'instant" }, ...planOpts(plans)], '')}
+      <label>Montant versé (DA)${help(HELP_VERSE, 'sm')}</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">`;
+  const foot = !m.id ? '' : `<div class="zone"><div class="row"><button type="button" class="btn sm alt" id="hist">Historique</button>${arch
+      ? '<button type="button" class="btn sm" id="unarch">Réactiver</button>' : '<button type="button" class="btn sm alt" id="arch">Archiver</button>'}
+    <button type="button" class="btn sm txt danger" id="del">Supprimer définitivement</button></div></div>`;
+  modal(`${head}
     <input type="hidden" name="id" value="${m.id ?? ''}">
+    <div class="grp">Identité</div>
     <label>Nom complet</label><input name="nom" required value="${esc(m.nom)}">
     <label>Téléphone</label><input name="tel" inputmode="tel" placeholder="0555 12 34 56" value="${esc(m.tel)}">
-    ${m.id ? '' : `<label>Formule (paiement enregistré)</label>${dd('plan_id', [{ v: '', l: "Aucun pour l'instant" }, ...planOpts(plans)], '')}
-      <label>Montant versé (DA)</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">`}
-    <label>Notes</label><input name="notes" value="${esc(m.notes)}">${btns()}
-    ${actions}`,
+    <label>Notes</label><input name="notes" value="${esc(m.notes)}">
+    <div class="grp">Abonnement</div>
+    ${abo}${btns()}${foot}`,
     async (d) => {
-      const id = await api.saveMember({ id: d.id ? +d.id : null, nom: d.nom, tel: d.tel, notes: d.notes, plan_id: d.plan_id ? +d.plan_id : null, verse: d.verse === '' ? null : d.verse });
+      const id = await api.saveMember({ id: d.id ? +d.id : null, nom: d.nom, tel: d.tel, notes: d.notes, fin: d.fin, plan_id: d.plan_id ? +d.plan_id : null, verse: d.verse === '' ? null : d.verse });
       toast(d.id ? 'Enregistré' : `Membre créé — n° ${id}`, d.id ? 2200 : 5000); pages.members();
-    });
+    }, { tall: !!m.id }); // the edit form is taller than a 640px window: it scrolls (no dropdown inside, so clipping is harmless)
+  if (m.id) $('#hist').onclick = () => { dlg.close(); historyDialog(m.id); };
+  if (m.id) {
+    const reopen = (msg) => { dlg.close(); toast(msg); pages.members(); memberDialog(m); };
+    $('#cam').onclick = () => { dlg.close(); photoDialog(m); };
+    $('#pick').onclick = guard(async () => { if (await api.pickPhoto(m.id)) reopen('Photo enregistrée'); });
+    $('#rmph')?.addEventListener('click', guard(async () => { await api.deletePhoto(m.id); reopen('Photo retirée'); }));
+  }
   if (m.id) $('#gel')?.addEventListener('click', paused
     ? guard(async () => { const r = await api.unfreeze(m.id); dlg.close(); toast(`Reprise — nouvelle fin : ${fdate(r.fin)}`, 4000); pages.members(); })
     : () => { dlg.close(); freezeDialog(m); });
@@ -552,7 +625,7 @@ async function memberDialog(m = {}) {
     $('#unarch')?.addEventListener('click', guard(async () => { await api.unarchiveMember(m.id); dlg.close(); toast('Membre réactivé'); pages.members(); }));
     $('#arch')?.addEventListener('click', () => {
       dlg.close();
-      modal(`<h3>Archiver ?</h3><p class="muted" style="margin-top:12px">${esc(m.nom)} disparaît des listes et des statistiques et ne peut plus entrer. Ses paiements et son historique sont conservés : les revenus ne changent pas. Vous pourrez le réactiver depuis le filtre « Archivés ».</p>${m.fin >= todayStr() ? `<p style="margin-top:12px"><b>Son abonnement est encore valide jusqu'au ${fdate(m.fin)}.</b></p>` : ''}${btns('Archiver')}`,
+      modal(`<h3>Archiver ?</h3><p class="muted" style="margin-top:12px">${esc(m.nom)} quitte les listes et les statistiques et ne peut plus entrer. Ses paiements restent.</p>${m.fin >= todayStr() ? `<p style="margin-top:12px"><b>Son abonnement est encore valide jusqu'au ${fdate(m.fin)}.</b></p>` : ''}${btns('Archiver')}`,
         async () => { await api.archiveMember(m.id); toast('Membre archivé'); pages.members(); });
     });
     // hard delete is for mistakes: say what it would erase (past revenue shrinks with the payments)
@@ -590,8 +663,8 @@ function importDialog(kind = 'members') {
 
 function freezeDialog(m) {
   const t = todayStr();
-  modal(`<h3>Mettre en pause</h3><p class="muted" style="margin-top:8px">${esc(m.nom)} — fin actuelle : ${fdate(m.fin)}. La fin d'abonnement est repoussée d'autant de jours ; l'entrée est refusée pendant la pause.</p>
-    <label>Durée (jours)</label><input name="jours" type="number" min="1" max="365" step="1" value="14" required>
+  modal(`<h3>Mettre en pause</h3><p class="muted" style="margin-top:8px">${esc(m.nom)} — fin actuelle : ${fdate(m.fin)}</p>
+    <label>Durée (jours)${help("La fin d'abonnement est repoussée d'autant de jours ; l'entrée est refusée pendant la pause.", 'sm')}</label><input name="jours" type="number" min="1" max="365" step="1" value="14" required>
     <label>À partir du</label><input name="debut" type="date" value="${t}" min="${t}" required>
     <p id="gnew" style="margin:12px 4px 0;font-weight:500"></p>${btns('Mettre en pause')}`,
     async (d) => { const r = await api.freeze(m.id, +d.jours, d.debut); toast(`Pause enregistrée — nouvelle fin : ${fdate(r.fin)}`, 4000); pages.members(); });
@@ -655,8 +728,7 @@ function restockDialog(prods) {
     chips(); count();
   };
 
-  modal(`<h3>Réapprovisionner</h3>
-    <p class="muted" style="margin-top:8px">Quantité reçue par produit. Un nombre négatif corrige le stock.</p>
+  modal(`<h3>Réapprovisionner${help('Quantité reçue par produit, en unités. Un nombre négatif corrige le stock.')}</h3>
     <div class="row rs-bar"><input class="search" id="rsq" placeholder="Nom ou catégorie" autocomplete="off">${cats.length ? dd('cat', catOpts, '') : ''}</div>
     <div class="row rs-flt" id="rsflt"></div>
     <div id="rslist"></div>
@@ -698,9 +770,66 @@ async function renewDialog(id, back) {
   const m = found.find((x) => x.id === id); // the search also matches phone numbers, so pick the exact member
   modal(`<h3>Renouveler</h3><p class="muted" style="margin-top:8px">${esc(m.nom)} — fin actuelle : ${fdate(m.fin)}</p>
     <label>Formule</label>${dd('plan_id', planOpts(plans), m.plan_id)}
-    <label>Montant versé (DA)</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">
-    <p class="muted" style="margin-top:12px;font-size:14px">Montant plus bas que le prix : le reste est noté en dette.<br>La période commence à la fin actuelle (aujourd'hui si expiré).</p>${btns('Encaisser')}`,
+    <label>Montant versé (DA)${help(HELP_VERSE, 'sm')}</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">${btns('Encaisser')}`,
     async (d) => { const r = await api.renew(id, +d.plan_id, d.verse === '' ? null : +d.verse); toast(`Paiement enregistré — valable jusqu'au ${fdate(r.fin)}`, 4000); typeof back === 'function' ? back() : pages[back](); });
+}
+
+// webcam capture for the member photo: live preview, « Capturer » takes a centre-cropped square frame; the camera stops when the dialog closes
+async function photoDialog(m) {
+  let stream;
+  modal(`<h3>Photo</h3><p class="muted" style="margin-top:8px">${esc(m.nom)} — cadrez le visage, puis capturez.</p>
+    <div class="cam"><video id="cam" autoplay playsinline muted></video></div>${btns('Capturer')}`,
+    async () => {
+      const v = $('#cam');
+      if (!v.videoWidth) throw new Error('Webcam pas prête');
+      const s = Math.min(v.videoWidth, v.videoHeight), c = document.createElement('canvas');
+      c.width = c.height = 320;
+      c.getContext('2d').drawImage(v, (v.videoWidth - s) / 2, (v.videoHeight - s) / 2, s, s, 0, 0, 320, 320);
+      await api.savePhoto(m.id, c.toDataURL('image/jpeg', 0.85));
+      toast('Photo enregistrée'); pages.members();
+      setTimeout(() => memberDialog(m), 0); // after modal() has closed this dialog
+    });
+  dlg.addEventListener('close', () => stream?.getTracks().forEach((t) => t.stop()), { once: true });
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
+    if (dlg.open) $('#cam').srcObject = stream; else stream.getTracks().forEach((t) => t.stop());
+  } catch { fail(new Error('Webcam introuvable ou refusée : utilisez « Fichier… ».')); }
+}
+
+// One member's story (wide dialog, opened by clicking a name): header = photo, name, « N° · phone · status », « formule · end · debt »,
+// notes, and the day-to-day actions on the right (Renouveler, Encaisser when owed, Modifier); four small figures (entries this month,
+// in total, last visit, total paid); then the money ledger (payments and later versements, newest first, one line each) beside the
+// last 30 check-ins, both tables scrolling to the same height.
+async function historyDialog(id) {
+  const h = await api.memberHistory(id), m = h.member;
+  const ops = [
+    ...h.paiements.map((y) => ({ date: y.date, id: y.id, lib: esc(y.plan) || 'Abonnement', periode: `${fdate(y.debut)} → ${fdate(y.fin)}`, montant: y.montant, note: y.prix > y.montant ? `sur ${da(y.prix)}` : '', dette: y.dette })),
+    ...h.versements.map((v) => ({ date: v.date, id: v.id, lib: 'Règlement de dette', periode: '', montant: v.montant, note: '', dette: 0 })),
+  ].sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1));
+  const paye = ops.reduce((a, o) => a + o.montant, 0);
+  const hm = (ts) => new Date(ts).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  const jour = (d) => new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' });
+  const fig = (k, v) => `<div class="card mini"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  const acts = `${m.archive_le ? '' : '<button type="button" class="btn sm" id="hrenew">Renouveler</button>'}${m.dette > 0 ? '<button type="button" class="btn sm alt" id="hsettle">Encaisser</button>' : ''}<button type="button" class="btn sm alt" id="hedit">Modifier</button>`;
+  modal(`<div class="row hd">${avatar(m, { [m.id]: m.photo }, 's72')}<div class="who">
+      <h3>${esc(m.nom)}</h3>
+      <p class="muted">N° ${m.id}${m.tel ? ` · ${telLink(m)}` : ''} ${pill(m)}</p>
+      <p class="muted">${esc(m.plan) || 'Sans formule'}${m.fin ? ` · jusqu'au ${fdate(m.fin)}` : ''}${m.dette > 0 ? ` <span class="pill bad">Doit ${da(m.dette)}</span>` : ''}</p>
+      ${m.notes ? `<p class="muted note">${esc(m.notes)}</p>` : ''}</div>
+      <div class="row acts">${acts}</div></div>
+    <div class="grid mini">${fig('Entrées ce mois', h.nbMois)}${fig('Entrées au total', h.nbEntrees)}${fig('Dernière venue', h.entrees[0] ? fdate(h.entrees[0].day) : '—')}${fig('Payé au total', `${paye.toLocaleString('fr-DZ')}<small>DA</small>`)}</div>
+    <div class="hist">
+      <div><h4>Paiements <span class="muted">${ops.length}</span></h4>
+        <div class="tk-list">${ops.length ? `<table><tr><th>Date</th><th>Opération</th><th>Période</th><th class="num">Montant</th></tr>${ops.map((o) => `
+          <tr><td class="muted">${fdate(o.date)}</td><td class="wrap">${o.lib}</td><td class="muted">${o.periode}</td><td class="num"><b>${da(o.montant)}</b>${o.note ? `<div class="sub">${o.note}</div>` : ''}${o.dette > 0 ? `<div><span class="pill bad">Reste ${da(o.dette)}</span></div>` : ''}</td></tr>`).join('')}</table>` : '<div class="empty" style="padding:20px">Aucun paiement.</div>'}</div></div>
+      <div><h4>Entrées <span class="muted">${h.nbEntrees > h.entrees.length ? `${h.entrees.length} dernières` : h.nbEntrees}</span></h4>
+        <div class="tk-list">${h.entrees.length ? `<table><tr><th>Jour</th><th class="num">Heure</th></tr>${h.entrees.map((e) => `<tr><td>${jour(e.day)}</td><td class="muted num">${hm(e.ts)}</td></tr>`).join('')}</table>` : '<div class="empty" style="padding:20px">Jamais venu.</div>'}</div></div>
+    </div>`, async () => {}, { wide: true });
+  bindWa(dlg, () => m);
+  const again = () => historyDialog(id); // come back here after the action
+  $('#hrenew')?.addEventListener('click', () => { dlg.close(); renewDialog(id, again); });
+  $('#hsettle')?.addEventListener('click', () => { dlg.close(); settleDialog(m, again); });
+  $('#hedit').onclick = () => { dlg.close(); memberDialog(m); };
 }
 
 /* ---------- nav ---------- */
@@ -715,16 +844,26 @@ async function backupDialog() {
   const [i, auto] = await Promise.all([api.backupInfo(), api.autostartInfo()]);
   const m = i.last?.match(/(\d{4})-(\d\d)-(\d\d)-(\d\d)(\d\d)/);
   modal(`<h3>Paramètres</h3>
-    <label>Copie automatique</label>
-    <p class="muted" style="margin:0 4px">Une copie à chaque fermeture (10 conservées).<br>Idéal : une clé USB ou un autre disque.</p>
-    <p style="margin:10px 4px 0;word-break:break-all"><b>${esc(i.dir)}</b></p>
+    <label>Copie automatique${help('Une copie toutes les 2 heures et à chaque fermeture, 10 de chaque conservées. Idéal : une clé USB ou un autre disque.', 'sm')}</label>
+    <p style="margin:0 4px;word-break:break-all"><b>${esc(i.dir)}</b></p>
     <p class="muted" style="margin:0 4px">Dernière copie : ${m ? `${m[3]}/${m[2]}/${m[1]} à ${m[4]}:${m[5]}` : 'aucune'}</p>
     <div class="row" style="margin-top:12px;justify-content:flex-start"><button type="button" class="btn alt sm" id="chdir">Changer le dossier</button></div>
     <label style="margin-top:24px">Copie manuelle et restauration</label>
     <div class="row" style="margin-top:8px;justify-content:flex-start"><button type="button" class="btn sm" id="now">Sauvegarder maintenant…</button><button type="button" class="btn alt sm" id="restore">Restaurer une sauvegarde…</button></div>
     <label style="margin-top:24px">Démarrage</label>
     ${auto.dispo ? `<label class="chk"><input type="checkbox" id="auto" ${auto.on ? 'checked' : ''}> Lancer l'application au démarrage de Windows</label>` : '<p class="muted" style="margin:0 4px">Disponible dans la version installée.</p>'}
+    <label style="margin-top:24px">Fermeture de la salle${help("Salle fermée (travaux, fêtes…) : tous les abonnements en cours sont prolongés d'autant de jours.", 'sm')}</label>
+    <div class="row" style="margin-top:8px;justify-content:flex-start"><input id="extj" type="number" min="1" max="365" step="1" value="7" style="width:110px" aria-label="Jours"><span class="muted">jours</span><button type="button" class="btn alt sm" id="ext">Prolonger…</button></div>
     `, async () => {});
+  $('#extj').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#ext').click(); } }; // the dialog form would otherwise just close
+  $('#ext').onclick = guard(async () => {
+    const j = Math.round(Number($('#extj').value));
+    if (!(j >= 1 && j <= 365)) throw new Error('Nombre de jours invalide (1 à 365)');
+    const s = await api.stats();
+    dlg.close();
+    modal(`<h3>Prolonger ?</h3><p class="muted" style="margin-top:12px">Les ${s.actifs} abonnements valides aujourd'hui finiront <b>${j} jour${j > 1 ? 's' : ''}</b> plus tard. Les abonnements expirés ne changent pas.</p>${btns('Prolonger')}`,
+      async () => { const n = await api.extendAll(j); toast(`${n} abonnement${n > 1 ? 's' : ''} prolongé${n > 1 ? 's' : ''} de ${j} jour${j > 1 ? 's' : ''}`, 4000); });
+  });
   $('#chdir').onclick = guard(async () => { if (await api.chooseBackupDir()) { dlg.close(); toast('Dossier enregistré'); } });
   $('#now').onclick = guard(async () => { if (await api.backup()) { dlg.close(); toast('Sauvegarde créée'); } });
   $('#auto')?.addEventListener('change', guard(async (e) => { await api.setAutostart(e.target.checked); toast(e.target.checked ? 'Démarrage automatique activé' : 'Démarrage automatique désactivé'); }));
