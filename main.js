@@ -420,6 +420,10 @@ const api = {
       db.prepare('UPDATE members SET nom=?, tel=?, notes=?, fin=? WHERE id=?').run(m.nom.trim(), m.tel || '', m.notes || '', fin, m.id);
       return m.id;
     }
+    // same name and same phone = the same person typed twice (the import skips them too); an archived one should be reactivated, not recreated
+    const digits = (t) => String(t || '').replace(/\D/g, '');
+    const dup = digits(m.tel) && db.prepare('SELECT id, nom, tel, archive_le FROM members WHERE lower(trim(nom)) = lower(trim(?))').all(m.nom).find((r) => digits(r.tel) === digits(m.tel));
+    if (dup) throw new Error(dup.archive_le ? `${dup.nom} (n° ${dup.id}) existe déjà, archivé : réactivez-le dans Membres › Archivés` : `${dup.nom} (n° ${dup.id}) existe déjà avec ce téléphone`);
     const id = db.prepare('INSERT INTO members(nom,tel,notes) VALUES(?,?,?)').run(m.nom.trim(), m.tel || '', m.notes || '').lastInsertRowid;
     if (m.plan_id) api.renew(Number(id), m.plan_id, m.verse);
     return Number(id);
@@ -599,7 +603,8 @@ const api = {
     fs.writeFileSync(settingsFile(), JSON.stringify({ ...settings(), backupDir: r.filePaths[0] }));
     return api.backupInfo();
   },
-  checkin(memberId) {
+  // force = « Autoriser quand même » on a weekly-limit refusal (desk decision, the row then counts like any other day)
+  checkin(memberId, force = false) {
     const m = db.prepare(`SELECT m.*, p.nom plan, p.seances_sem, ${DETTE_M} dette FROM members m LEFT JOIN plans p ON p.id=m.plan_id WHERE m.id=?`).get(memberId);
     if (!m) return { ok: false, code: 'inconnu', motif: 'Membre introuvable' };
     m.photo = photoOf(memberId); // the banner shows the face next to the name, so the desk can match the person
@@ -614,7 +619,7 @@ const api = {
       const debutSem = weekStart(t);
       const jours = db.prepare('SELECT DISTINCT day FROM checkins WHERE member_id=? AND day BETWEEN ? AND ? ORDER BY day').all(memberId, debutSem, t).map((r) => r.day);
       semaine = { n: jours.length, max: m.seances_sem, jours, reprise: addDays(debutSem, 7) };
-      if (!deja && jours.length >= m.seances_sem) {
+      if (!deja && jours.length >= m.seances_sem && !force) {
         return { ok: false, code: 'quota', motif: `Limite atteinte : ${m.seances_sem} séance${m.seances_sem > 1 ? 's' : ''} par semaine`, member: m, semaine };
       }
     }

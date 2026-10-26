@@ -115,7 +115,7 @@ const help = (text, cls = '') => `<span class="help ${cls}" tabindex="0" role="n
 const HELP_VERSE = 'Vide = prix complet. Plus bas que le prix : le reste est noté en dette. La période commence à la fin actuelle (aujourd\'hui si expiré).';
 
 // Caisse = two tabs: today's cash summary / payments history
-const caisseTabs = (on, extra = '') => `<div class="row noprint" style="margin-bottom:20px">${[['caisse', 'Aujourd\'hui'], ['pay', 'Historique des paiements']].map(([k, l]) => `<button class="chip ${on === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}${extra ? `<div class="row end">${extra}</div>` : ''}</div>`;
+const caisseTabs = (on, extra = '') => `<div class="row noprint" style="margin-bottom:20px">${[['caisse', 'Aujourd\'hui'], ['pay', 'Historique']].map(([k, l]) => `<button class="chip ${on === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}${extra ? `<div class="row end">${extra}</div>` : ''}</div>`;
 const bindTabs = () => view.querySelectorAll('[data-tab]').forEach((b) => b.onclick = () => pages[b.dataset.tab]());
 
 // stock text + status tag, shared by Boutique (tiles) and Produits (table)
@@ -142,7 +142,8 @@ let shopCart = [];
 /* ---------- pages ---------- */
 const pages = {
   async dash() {
-    const s = await api.stats();
+    const [s, prods] = await Promise.all([api.stats(), api.products()]);
+    const low = prods.filter((p) => stockState(p) !== 'ok').sort((a, b) => (stockState(a) === 'low') - (stockState(b) === 'low') || a.nom.localeCompare(b.nom, 'fr')); // ruptures first
     const st = pages.dash.state ??= { p: 0 };
     // row 1 = money, row 2 = members (each card opens Membres on the matching filter)
     view.innerHTML = `<h1>Tableau de bord</h1>
@@ -158,6 +159,7 @@ const pages = {
         <div class="card" data-go="members" data-f="exp" role="button" tabindex="0"><div class="k">Abonnements expirés</div><div class="v" style="color:var(--sale)">${s.expires}</div></div>
         <div class="card" data-go="members" data-f="inactif" role="button" tabindex="0"><div class="k">Inactifs depuis ${INACTIF_J} j</div><div class="v">${s.inactifs}</div></div>
       </div>
+      ${low.length ? `<div class="card low" data-go="products" data-s="${low.some((p) => stockState(p) === 'out') ? 'out' : 'low'}" role="button" tabindex="0"><div class="k">Stock à réapprovisionner · ${low.length}</div><div class="names">${low.map((p) => `<span>${esc(p.nom)} ${stockPill(p)}</span>`).join('')}</div></div>` : ''}
       <h2>À renouveler</h2><div id="renew"></div>`;
     // paged list, latest end date first (about to expire, then the most recently expired)
     const drawRenew = () => {
@@ -174,7 +176,7 @@ const pages = {
     drawRenew();
     // cards are shortcuts: Membres cards open the list already filtered
     view.querySelectorAll('[data-go]').forEach((c) => {
-      const open = () => { if (c.dataset.f) pages.members.state = { q: '', f: c.dataset.f, p: 0 }; go(c.dataset.go); };
+      const open = () => { if (c.dataset.f) pages.members.state = { q: '', f: c.dataset.f, p: 0 }; if (c.dataset.s) pages.products.state = { p: 0, q: '', s: c.dataset.s, cat: '' }; go(c.dataset.go); };
       c.onclick = open;
       c.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
     });
@@ -188,7 +190,11 @@ const pages = {
       inactif: (m) => m.fin >= t && (!m.derniere || m.derniere < d14), archive: () => true };
     // archived members only appear in their own view; every other view and count ignores them
     const pool = (k) => all.filter((m) => (k === 'archive') === !!m.archive_le);
-    const list = pool(state.f).filter(F[state.f]);
+    const due = (m) => ['bad', 'soon'].includes(status(m)[0]); // a row carries « Renouveler » only when it is due; the fiche keeps it for a prepayment
+    // sort: click a header (Nom / Fin) to toggle; members without an end date go last
+    const srt = state.sort ??= { k: 'nom', d: 1 };
+    const list = pool(state.f).filter(F[state.f]).sort((a, b) => srt.k === 'fin' ? (!a.fin) - (!b.fin) || srt.d * (a.fin < b.fin ? -1 : a.fin > b.fin ? 1 : 0) : srt.d * a.nom.localeCompare(b.nom, 'fr'));
+    const th = (k, l) => `<th class="sort${srt.k === k ? ' on' : ''}" data-sort="${k}" title="Trier">${l}${srt.k === k ? (srt.d > 0 ? ' ↑' : ' ↓') : ''}</th>`;
     state.p = Math.min(state.p, Math.max(0, Math.ceil(list.length / PER) - 1));
     const shown = list.slice(state.p * PER, (state.p + 1) * PER), photos = await fetchPhotos(shown);
     // what a filter means goes in the chip's tooltip; the Expirés view also carries the bulk-archive control (months input + button)
@@ -197,25 +203,27 @@ const pages = {
     view.innerHTML = `<h1>Membres</h1>
       <div class="row" style="margin-bottom:16px">
         <input class="search" id="q" placeholder="Nom, téléphone ou n° membre" value="${esc(state.q)}">
-        <div class="row end"><button class="btn alt" id="imp">Importer</button><button class="btn" id="add">+ Nouveau membre</button></div>
+        <div class="row end"><button class="btn" id="add">+ Nouveau membre</button></div>
       </div>
       <div class="row" style="margin-bottom:20px">
         ${[['all', 'Tous'], ['actif', 'Actifs'], ['soon', 'Bientôt'], ['exp', 'Expirés'], ['dette', 'Impayés'], ['inactif', 'Inactifs'], ['archive', 'Archivés']].map(([k, l]) => `<button class="chip ${state.f === k ? 'on' : ''}" data-f="${k}"${titles[k] ? ` title="${esc(titles[k])}"` : ''}>${l} ${pool(k).filter(F[k]).length}</button>`).join('')}
         ${hints[state.f] ? `<p class="muted" style="flex-basis:100%;margin:4px 4px 0;font-size:14px">${hints[state.f]}</p>` : ''}
       </div>
-      ${list.length ? `<table><tr><th>N°</th><th>Nom</th><th>Téléphone</th><th>Abonnement</th><th>Fin</th><th>Statut</th><th></th></tr>${shown.map((m) => `
-        <tr><td class="muted">${m.id}</td><td><div class="nm">${avatar(m, photos)}<button type="button" class="lnk" data-hist="${m.id}" title="Historique"><b>${esc(m.nom)}</b></button></div></td><td>${telLink(m)}</td><td class="wrap">${esc(m.plan) || '—'}</td><td>${fdate(m.fin)}</td><td>${pill(m)}</td>
+      ${list.length ? `<table><tr><th>N°</th>${th('nom', 'Nom')}<th>Téléphone</th><th>Abonnement</th>${th('fin', 'Fin')}<th>Statut</th><th></th></tr>${shown.map((m) => `
+        <tr data-row="${m.id}"><td class="muted">${m.id}</td><td><div class="nm">${avatar(m, photos)}<button type="button" class="lnk" data-hist="${m.id}" title="Fiche"><b>${esc(m.nom)}</b></button></div></td><td>${telLink(m)}</td><td class="wrap">${esc(m.plan) || '—'}</td><td>${fdate(m.fin)}</td><td>${pill(m)}</td>
         <td class="acts">${m.archive_le
           ? `<button class="btn sm" data-unarchive="${m.id}">Réactiver</button>`
-          : `<button class="btn sm ${status(m)[0] === 'ok' ? 'alt' : ''}" data-renew="${m.id}">Renouveler</button>`}<button class="btn sm alt" data-edit="${m.id}">Modifier</button></td></tr>`).join('')}</table>${pagerHtml(list.length, state.p)}`
+          : due(m) ? `<button class="btn sm" data-renew="${m.id}">Renouveler</button>` : ''}</td></tr>`).join('')}</table>${pagerHtml(list.length, state.p)}`
         : `<div class="empty">${state.f === 'archive' ? 'Aucun membre archivé.' : 'Aucun membre.'}</div>`}`;
     bindPager((p) => { state.p = p; pages.members(); });
     const q = $('#q');
     q.oninput = () => { state.q = q.value; state.p = 0; clearTimeout(q.t); q.t = setTimeout(async () => { await pages.members(); const n = $('#q'); n.focus(); n.setSelectionRange(99, 99); }, 200); };
     view.querySelectorAll('[data-f]').forEach((b) => b.onclick = () => { state.f = b.dataset.f; state.p = 0; pages.members(); });
+    view.querySelectorAll('[data-sort]').forEach((h) => h.onclick = () => { state.sort = { k: h.dataset.sort, d: srt.k === h.dataset.sort ? -srt.d : 1 }; state.p = 0; pages.members(); });
     $('#add').onclick = () => memberDialog();
-    $('#imp').onclick = () => importDialog('members');
     view.querySelectorAll('[data-hist]').forEach((b) => b.onclick = () => historyDialog(+b.dataset.hist));
+    // the row is the entry point (the name button stays for the keyboard); buttons inside the row keep their own action
+    view.querySelectorAll('tr[data-row]').forEach((r) => r.onclick = (e) => { if (!e.target.closest('button')) historyDialog(+r.dataset.row); });
     bindWa(view, (id) => all.find((m) => m.id === id));
     $('#oldm')?.addEventListener('input', (e) => { state.mois = e.target.value; });
     $('#arcold')?.addEventListener('click', guard(async () => {
@@ -227,7 +235,6 @@ const pages = {
     }));
     view.querySelectorAll('[data-renew]').forEach((b) => b.onclick = () => renewDialog(+b.dataset.renew, 'members'));
     view.querySelectorAll('[data-unarchive]').forEach((b) => b.onclick = guard(async () => { await api.unarchiveMember(+b.dataset.unarchive); toast('Membre réactivé'); pages.members(); }));
-    view.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => memberDialog(all.find((m) => m.id == b.dataset.edit)));
   },
 
   async checkin() {
@@ -254,14 +261,15 @@ const pages = {
         $('#res').innerHTML = ''; toast('Entrée annulée'); renderToday();
         setTimeout(() => $('#scan')?.focus(), 50); // once the dialog has closed (focus is blocked while it is open)
       });
-    const enter = async (id) => {
+    const enter = async (id, force = false) => {
       clearTimeout(timer);
-      const r = await api.checkin(id);
+      const r = await api.checkin(id, force);
       const name = r.member ? esc(r.member.nom) : '';
       const face = r.member ? avatar(r.member, { [r.member.id]: r.member.photo }, 's88') : '';
       const left = r.member?.fin ? Math.round((new Date(r.member.fin + 'T00:00:00') - new Date(todayStr() + 'T00:00:00')) / 864e5) : -1;
       const soon = r.ok && left <= 7 ? (left === 0 ? 'Expire aujourd\'hui' : `Expire dans ${left} jour${left > 1 ? 's' : ''}`) : '';
-      const msg = r.ok ? (r.deja ? 'Déjà enregistré aujourd\'hui' : 'Entrée enregistrée') : esc(r.motif);
+      // green already says it (no « Entrée enregistrée »); an expiry refusal carries the date instead of a second « fin » on the name line
+      const msg = r.ok ? (r.deja ? 'Déjà enregistré aujourd\'hui' : '') : r.code === 'expire' ? (r.member.fin ? `Expiré depuis le ${fdate(r.member.fin)}` : 'Aucun abonnement') : esc(r.motif);
       const sem = r.semaine, dayFmt = (d) => new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric' });
       const week = !sem ? '' : r.ok ? `<div><strong>Séance ${sem.n} sur ${sem.max} cette semaine</strong></div>`
         : `<div><strong>Prochaine séance : ${new Date(sem.reprise + 'T00:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}</strong></div><div style="opacity:.85">Venu cette semaine : ${sem.jours.map(dayFmt).join(' · ')}</div>`;
@@ -269,10 +277,12 @@ const pages = {
       const due = r.member?.dette > 0 ? `<div><strong>Reste à payer : ${da(r.member.dette)}</strong></div>` : '';
       const settle = due ? `<button class="btn alt" id="sd">Encaisser</button>` : '';
       const undoBtn = r.ok ? `<button class="btn alt" id="undo">Annuler l'entrée</button>` : '';
-      $('#res').innerHTML = `<div class="result ${r.ok ? 'ok' : 'bad'}"><div class="who">${face}<div><b>${r.ok ? 'Bienvenue' : 'Accès refusé'}</b><div>${name}${r.member ? ` — fin ${fdate(r.member.fin)}` : ''}</div></div></div><div style="text-align:right">${msg}${soon ? `<div><strong>${soon}</strong></div>` : ''}${week}${due}${renew || settle || undoBtn ? `<div class="row" style="justify-content:flex-end;margin-top:12px">${renew}${settle}${undoBtn}</div>` : ''}</div></div>`;
+      const okBtn = r.code === 'quota' ? `<button class="btn alt" id="force">Autoriser quand même</button>` : ''; // desk exception to the weekly limit; « Annuler l'entrée » takes it back
+      $('#res').innerHTML = `<div class="result ${r.ok ? 'ok' : 'bad'}"><div class="who">${face}<div><b>${r.ok ? 'Bienvenue' : 'Accès refusé'}</b><div>${name}${r.member && !soon && r.code !== 'expire' ? ` — fin ${fdate(r.member.fin)}` : ''}</div></div></div><div style="text-align:right">${msg}${soon ? `<div><strong>${soon}</strong></div>` : ''}${week}${due}${renew || settle || undoBtn || okBtn ? `<div class="row" style="justify-content:flex-end;margin-top:12px">${renew}${settle}${undoBtn}${okBtn}</div>` : ''}</div></div>`;
       if (renew) $('#rn').onclick = () => renewDialog(id, () => enter(id)); // after paying, check the member in
       if (settle) $('#sd').onclick = () => settleDialog(r.member, () => enter(id));
       if (undoBtn) $('#undo').onclick = () => undo(id, r.member.nom);
+      if (okBtn) $('#force').onclick = guard(() => enter(id, true));
       // clear the banner so it never looks like the current person; keep it longer when it carries a Renouveler button
       clearTimeout(bannerT);
       bannerT = setTimeout(() => { const el = $('#res'); if (el) el.innerHTML = ''; }, r.ok && !soon ? 6000 : 15000);
@@ -330,17 +340,17 @@ const pages = {
     const sum = (a) => a.reduce((s, x) => s + x.total, 0);
     const abos = c.reglements.n ? [...c.abos, { nom: 'Règlements de dettes', n: c.reglements.n, total: c.reglements.total }] : c.abos;
     const tAbos = sum(abos), tVentes = sum(c.ventes);
-    const tbl = (rows, label) => (rows.length ? `<table><tr><th>${label}</th><th class="num">Nombre</th><th class="num">Total</th></tr>${rows.map((r) => `
-      <tr><td><b>${esc(r.nom)}</b>${r.dose ? ' <span class="muted">(dose)</span>' : ''}</td><td class="num">${r.n}</td><td class="num">${da(r.total)}</td></tr>`).join('')}</table>` : '<div class="empty">Rien.</div>');
+    // no section title over a table: its first header (Abonnement / Produit) names it, and the cards above show the same split; an empty one is simply not shown
+    const tbl = (rows, label) => (rows.length ? `<table style="margin-top:28px"><tr><th>${label}</th><th class="num">Nombre</th><th class="num">Total</th></tr>${rows.map((r) => `
+      <tr><td><b>${esc(r.nom)}</b>${r.dose ? ' <span class="muted">(dose)</span>' : ''}</td><td class="num">${r.n}</td><td class="num">${da(r.total)}</td></tr>`).join('')}</table>` : '');
     view.innerHTML = `<h1>Caisse</h1>${caisseTabs('caisse', `<input type="date" id="cd" value="${st.date}" style="width:auto"><button class="btn alt" id="xls" title="Toutes les opérations du mois en Excel">Exporter le mois</button><button class="btn" id="print">Imprimer</button>`)}
       <p class="muted printonly">Caisse du ${fdate(st.date)}</p>
       <div class="grid" style="grid-template-columns:repeat(3,1fr)">
-        <div class="card dark"><div class="k">Total du ${fdate(st.date)}</div><div class="v">${(tAbos + tVentes).toLocaleString('fr-DZ')}<small>DA</small></div></div>
+        <div class="card dark"><div class="k">Total</div><div class="v">${(tAbos + tVentes).toLocaleString('fr-DZ')}<small>DA</small></div></div>
         <div class="card"><div class="k">Abonnements</div><div class="v">${tAbos.toLocaleString('fr-DZ')}<small>DA</small></div></div>
         <div class="card"><div class="k">Boutique</div><div class="v">${tVentes.toLocaleString('fr-DZ')}<small>DA</small></div></div>
       </div>
-      <h2>Abonnements</h2>${tbl(abos, 'Abonnement')}
-      <h2>Boutique</h2>${tbl(c.ventes, 'Produit')}`;
+      ${tbl(abos, 'Abonnement')}${tbl(c.ventes, 'Produit')}`;
     bindTabs();
     $('#cd').onchange =(e) => { if (e.target.value) { st.date = e.target.value; pages.caisse(); } };
     $('#print').onclick = () => window.print();
@@ -376,7 +386,7 @@ const pages = {
     const avail = (p) => p.stock - shopCart.filter((l) => l.id === p.id).reduce((a, l) => a + units(l), 0); // stock not yet in the ticket
 
     view.innerHTML = `<div class="pos-top"><h1>Boutique</h1>
-        <div class="row"><span class="muted">${tickets.length} ticket${tickets.length > 1 ? 's' : ''} · ${da(sold)} aujourd'hui</span><button type="button" class="btn alt" id="tkday">Ventes du jour</button></div></div>
+        <button type="button" class="lnk muted" id="tkday" title="Ventes du jour">${tickets.length} ticket${tickets.length > 1 ? 's' : ''} · ${da(sold)} aujourd'hui →</button></div>
       <div class="row" style="margin-bottom:16px">
         <input class="search" id="q" placeholder="Chercher un produit" value="${esc(st.q)}" autocomplete="off">${chips}
       </div>
@@ -387,7 +397,7 @@ const pages = {
           <div class="tk-head"><b>Ticket</b><span class="muted" id="tkcount"></span><button type="button" class="chip" id="tkclear">Vider</button></div>
           <div class="tk-lines" id="tklines"></div>
           <div class="tk-sum"><span>Total</span><b id="tktotal"></b></div>
-          <input id="tkrecu" type="number" min="0" step="1" placeholder="Montant reçu (vide = exact)" aria-label="Montant reçu en DA" autocomplete="off">
+          <input id="tkrecu" type="number" min="0" step="1" placeholder="Montant reçu" title="Vide = montant exact" aria-label="Montant reçu en DA" autocomplete="off">
           <div class="tk-quick" id="tkquick"></div>
           <div class="tk-change" id="tkchange"></div>
           <button type="button" class="btn tk-pay" id="tkpay">Encaisser</button>
@@ -430,7 +440,7 @@ const pages = {
       $('#tktotal').innerHTML = big(t);
       // suggested cash amounts: the exact total, then the next round amounts
       const tenders = [...new Set([t, ...[100, 500, 1000, 2000].map((s) => Math.ceil(t / s) * s)])].sort((a, b) => a - b).slice(0, 3);
-      $('#tkquick').innerHTML = t ? tenders.map((v, i) => `<button type="button" class="chip" data-recu="${v}">${i === 0 ? 'Exact' : da(v)}</button>`).join('') : '';
+      $('#tkquick').innerHTML = t ? tenders.slice(1).map((v) => `<button type="button" class="chip" data-recu="${v}">${da(v)}</button>`).join('') : ''; // no « Exact » chip: an empty field already means exact
       $('#tkchange').className = `tk-change${short ? ' short' : ''}`;
       $('#tkchange').innerHTML = !t || recu === null ? '' : short ? `<span>Reste à payer</span><b>${da(t - recu)}</b>` : `<span>Rendu à donner</span><b>${da(recu - t)}</b>`;
       $('#tkpay').disabled = !t || short;
@@ -494,11 +504,12 @@ const pages = {
     const prods = await api.products();
     const stock = stockLabel;
     const cats = [...new Set(prods.map((p) => p.categorie).filter(Boolean))];
+    const hasDose = prods.some((p) => p.doses > 1); // « Prix dose » column only when something is sold by the dose
     if (st.cat && st.cat !== '__none' && !cats.includes(st.cat)) st.cat = '';
     view.innerHTML = `<h1>Produits</h1>
       <div class="row" style="margin-bottom:16px">
         <input class="search" id="q" placeholder="Nom ou catégorie" value="${esc(st.q)}">
-        <div class="row end"><button class="btn alt" id="rs" ${prods.length ? '' : 'disabled'}>Réapprovisionner</button><button class="btn alt" id="imp">Importer</button><button class="btn" id="add">+ Nouveau produit</button></div>
+        <div class="row end"><button class="btn alt" id="rs" ${prods.length ? '' : 'disabled'}>Réapprovisionner</button><button class="btn" id="add">+ Nouveau produit</button></div>
       </div>
       <div id="flt" style="margin-bottom:20px"></div>
       <div id="tbl"></div>`;
@@ -510,20 +521,19 @@ const pages = {
       const list = prods.filter((p) => matches(p));
       st.p = Math.min(st.p, Math.max(0, Math.ceil(list.length / PER_PRODUCTS) - 1));
       const chip = (g, k, l, n) => `<button class="chip ${st[g] === k ? 'on' : ''}" data-${g}="${esc(k)}">${esc(l)} ${n}</button>`;
-      const frow = (label, chips) => `<div class="frow"><span class="flab">${label}</span><div class="row" style="gap:8px">${chips}</div></div>`;
-      $('#flt').innerHTML = frow('Stock', [['all', 'Tous'], ['out', 'Rupture'], ['low', 'Bientôt vide'], ['ok', 'En stock']]
+      const frow = (chips) => `<div class="frow"><div class="row" style="gap:8px">${chips}</div></div>`; // the chips name themselves (Rupture…, Boissons…): no row label
+      $('#flt').innerHTML = frow([['all', 'Tous'], ['out', 'Rupture'], ['low', 'Bientôt vide'], ['ok', 'En stock']]
         .map(([k, l]) => chip('s', k, l, prods.filter((p) => matches(p, 's') && (k === 'all' || stockState(p) === k)).length)).join(''))
-        + (cats.length ? frow('Catégorie', [['', 'Toutes'], ...cats.map((c) => [c, c]), ...(prods.some((p) => !p.categorie) ? [['__none', 'Sans catégorie']] : [])]
+        + (cats.length ? frow([['', 'Toutes'], ...cats.map((c) => [c, c]), ...(prods.some((p) => !p.categorie) ? [['__none', 'Sans catégorie']] : [])]
           .map(([k, l]) => chip('cat', k, l, prods.filter((p) => matches(p, 'c') && (k === '' || catOf(p) === k)).length)).join('')) : '');
-      $('#tbl').innerHTML = list.length ? `<table><tr><th>Produit</th><th>Catégorie</th><th class="num">Prix</th><th class="num">Prix dose</th><th>Stock</th><th></th></tr>${list.slice(st.p * PER_PRODUCTS, (st.p + 1) * PER_PRODUCTS).map((p) => `
-        <tr><td><b>${esc(p.nom)}</b>${p.code_barre ? `<div class="sub">${esc(p.code_barre)}</div>` : ''}</td><td class="muted">${esc(p.categorie) || '—'}</td><td class="num">${da(p.prix)}</td><td class="num">${p.doses > 1 ? da(p.prix_dose) : '—'}</td>
-        <td>${p.stock ? stock(p) + ' ' : ''}${stockPill(p)}</td>
-        <td class="acts"><button class="btn sm alt" data-edit="${p.id}">Modifier</button></td></tr>`).join('')}</table>${pagerHtml(list.length, st.p, PER_PRODUCTS)}`
+      $('#tbl').innerHTML = list.length ? `<table><tr><th>Produit</th><th class="num">Prix</th>${hasDose ? '<th class="num">Prix dose</th>' : ''}<th>Stock</th></tr>${list.slice(st.p * PER_PRODUCTS, (st.p + 1) * PER_PRODUCTS).map((p) => `
+        <tr data-row="${p.id}"><td><b>${esc(p.nom)}</b>${p.categorie || p.code_barre ? `<div class="sub">${esc([p.categorie, p.code_barre].filter(Boolean).join(' · '))}</div>` : ''}</td><td class="num">${da(p.prix)}</td>${hasDose ? `<td class="num">${p.doses > 1 ? da(p.prix_dose) : '—'}</td>` : ''}
+        <td>${p.stock ? stock(p) + ' ' : ''}${stockPill(p)}</td></tr>`).join('')}</table>${pagerHtml(list.length, st.p, PER_PRODUCTS)}`
         : `<div class="empty">${prods.length ? 'Aucun produit ne correspond.' : 'Aucun produit. Ajoutez eau, boissons, compléments…'}</div>`;
       $('#flt').querySelectorAll('[data-s]').forEach((c) => c.onclick = () => { st.s = c.dataset.s; st.p = 0; draw(); });
       $('#flt').querySelectorAll('[data-cat]').forEach((c) => c.onclick = () => { st.cat = c.dataset.cat; st.p = 0; draw(); });
       bindPager((p) => { st.p = p; draw(); });
-      view.querySelectorAll('[data-edit]').forEach((c) => c.onclick = () => dialog(prods.find((p) => p.id == c.dataset.edit)));
+      view.querySelectorAll('tr[data-row]').forEach((r) => r.onclick = () => dialog(prods.find((p) => p.id == r.dataset.row))); // the row opens the product
     };
     $('#q').oninput = (e) => { st.q = e.target.value; st.p = 0; draw(); };
     $('#rs').onclick = () => restockDialog(prods);
@@ -538,7 +548,7 @@ const pages = {
           : `<label>Doses par unité${help('Produit aussi vendu à la dose (whey, créatine…) : nombre de doses dans une unité. Vide sinon.', 'sm')}</label><input name="doses" type="number" min="2" step="1" placeholder="Vide = vendu entier">
              <label>Prix de la dose (DA)</label><input name="prix_dose" type="number" min="0">
              <label>Stock initial</label><input name="stock" type="number" min="0" step="1" placeholder="0 unité">`}
-        ${btns()}${p.id ? '<button type="button" class="btn sm danger" id="del" style="margin-top:20px">Supprimer ce produit</button>' : ''}`,
+        ${btns()}${p.id ? '<button type="button" class="btn sm danger" id="del" style="margin-top:20px">Supprimer</button>' : ''}`,
         async (d) => {
           await api.saveProduct({ id: d.id ? +d.id : null, nom: d.nom.trim(), prix: +d.prix, doses: d.doses ? +d.doses : 1, prix_dose: d.prix_dose ? +d.prix_dose : null, stock: +d.stock || 0, categorie: d.categorie, code_barre: d.code_barre });
           toast('Enregistré'); pages.products();
@@ -550,7 +560,6 @@ const pages = {
       };
     };
     $('#add').onclick = () => dialog();
-    $('#imp').onclick = () => importDialog('products');
     draw();
   },
 
@@ -558,22 +567,25 @@ const pages = {
     const plans = await api.plans();
     view.innerHTML = `<h1>Formules</h1>
       <div class="row" style="margin-bottom:20px;justify-content:flex-end"><button class="btn" id="add">+ Nouvelle formule</button></div>
-      <table><tr><th>Nom</th><th class="num">Durée (jours)</th><th class="num">Séances / semaine</th><th class="num">Prix</th><th></th></tr>${plans.map((p) => `
-        <tr><td><b>${esc(p.nom)}</b></td><td class="num">${p.jours}</td><td class="num">${p.seances_sem ?? '<span class="muted">Illimité</span>'}</td><td class="num">${da(p.prix)}</td><td class="acts"><button class="btn sm alt" data-edit="${p.id}">Modifier</button><button class="btn sm danger" data-del="${p.id}">Supprimer</button></td></tr>`).join('')}</table>`;
-    view.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => {
-      const p = plans.find((x) => x.id == b.dataset.del);
-      modal(`<h3>Supprimer ?</h3><p class="muted" style="margin-top:12px">Formule « ${esc(p.nom)} ». Impossible si elle est utilisée par un membre ou un paiement.</p>${btns('Supprimer')}`,
-        async () => { await api.deletePlan(p.id); toast('Formule supprimée'); pages.plans(); });
-    });
-    const dialog = (p = {}) => modal(`<h3>${p.id ? 'Modifier la' : 'Nouvelle'} formule</h3>
+      <table><tr><th>Nom</th><th class="num">Durée (jours)</th><th class="num">Séances / semaine</th><th class="num">Prix</th></tr>${plans.map((p) => `
+        <tr data-row="${p.id}"><td><b>${esc(p.nom)}</b></td><td class="num">${p.jours}</td><td class="num">${p.seances_sem ?? '<span class="muted" title="Illimité">∞</span>'}</td><td class="num">${da(p.prix)}</td></tr>`).join('')}</table>`;
+    // the row opens the formule; « Supprimer » sits in the dialog, like a product's
+    const dialog = (p = {}) => {
+      modal(`<h3>${p.id ? 'Modifier la' : 'Nouvelle'} formule</h3>
       <input type="hidden" name="id" value="${p.id ?? ''}">
       <label>Nom</label><input name="nom" required value="${esc(p.nom)}">
       <label>Durée (jours)</label><input name="jours" type="number" min="1" required value="${p.jours ?? 30}">
       <label>Séances par semaine${help(`Jours de présence autorisés par semaine (du ${DAYS_FR[APP.weekStart]} au ${DAYS_FR[(APP.weekStart + 6) % 7]}). Vide = illimité.`, 'sm')}</label><input name="seances_sem" type="number" min="1" max="7" step="1" placeholder="Illimité" value="${p.seances_sem ?? ''}">
-      <label>Prix (DA)</label><input name="prix" type="number" min="0" step="1" required value="${p.prix ?? ''}">${btns()}`,
+      <label>Prix (DA)</label><input name="prix" type="number" min="0" step="1" required value="${p.prix ?? ''}">${btns()}${p.id ? '<button type="button" class="btn sm danger" id="del" style="margin-top:20px">Supprimer</button>' : ''}`,
       async (d) => { await api.savePlan({ id: d.id ? +d.id : null, nom: d.nom.trim(), jours: +d.jours, prix: +d.prix, seances_sem: d.seances_sem === '' ? null : +d.seances_sem }); toast('Enregistré'); pages.plans(); });
+      if (p.id) $('#del').onclick = () => {
+        dlg.close();
+        modal(`<h3>Supprimer ?</h3><p class="muted" style="margin-top:12px">Formule « ${esc(p.nom)} ». Impossible si elle est utilisée par un membre ou un paiement.</p>${btns('Supprimer')}`,
+          async () => { await api.deletePlan(p.id); toast('Formule supprimée'); pages.plans(); });
+      };
+    };
     $('#add').onclick = () => dialog();
-    view.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => dialog(plans.find((p) => p.id == b.dataset.edit)));
+    view.querySelectorAll('tr[data-row]').forEach((r) => r.onclick = () => dialog(plans.find((p) => p.id == r.dataset.row)));
   },
 };
 
@@ -594,11 +606,11 @@ async function memberDialog(m = {}) {
       <div class="row fin"><input name="fin" type="date" value="${esc(m.fin ?? '')}">${pauseBtn}</div>
       ${paused ? `<p class="muted note">Pause du ${fdate(m.gel_debut)} au ${fdate(m.gel_fin)}.</p>` : ''}
       ${arch ? `<p class="muted note">Archivé le ${fdate(m.archive_le)} : hors des listes, ne peut plus entrer.</p>` : ''}`
-    : `<label>Formule${help('Le paiement est enregistré aussitôt avec la formule choisie. « Aucun » : membre créé sans abonnement.', 'sm')}</label>${dd('plan_id', [{ v: '', l: "Aucun pour l'instant" }, ...planOpts(plans)], '')}
+    : `<label>Formule${help('Le paiement est enregistré aussitôt avec la formule choisie. « Aucune » : membre créé sans abonnement.', 'sm')}</label>${dd('plan_id', [{ v: '', l: 'Aucune' }, ...planOpts(plans)], '')}
       <label>Montant versé (DA)${help(HELP_VERSE, 'sm')}</label><input name="verse" type="number" min="0" step="1" placeholder="Prix complet">`;
   const foot = !m.id ? '' : `<div class="zone"><div class="row"><button type="button" class="btn sm alt" id="hist">Historique</button>${arch
       ? '<button type="button" class="btn sm" id="unarch">Réactiver</button>' : '<button type="button" class="btn sm alt" id="arch">Archiver</button>'}
-    <button type="button" class="btn sm txt danger" id="del">Supprimer définitivement</button></div></div>`;
+    <button type="button" class="btn sm txt danger" id="del">Supprimer</button></div></div>`;
   modal(`${head}
     <input type="hidden" name="id" value="${m.id ?? ''}">
     <div class="grp">Identité</div>
@@ -639,8 +651,8 @@ async function memberDialog(m = {}) {
 }
 
 const IMPORTS = {
-  members: { titre: 'membres', onglet: 'Membres', model: 'importModel', pick: 'importMembers', after: () => pages.members() },
-  products: { titre: 'produits', onglet: 'Produits', model: 'importProductsModel', pick: 'importProducts', after: () => pages.products() },
+  members: { titre: 'membres', onglet: 'Membres', model: 'importModel', pick: 'importMembers', after: () => go('members') },
+  products: { titre: 'produits', onglet: 'Produits', model: 'importProductsModel', pick: 'importProducts', after: () => go('products') },
 };
 
 function importDialog(kind = 'members') {
@@ -697,39 +709,36 @@ function salesDialog(tickets) {
 // what was typed lives in `qty`, so it survives page changes and filters.
 function restockDialog(prods) {
   const PER_RS = 7;
-  const cats = [...new Set(prods.map((p) => p.categorie).filter(Boolean))];
-  const rs = { q: '', cat: '', s: 'all', p: 0 }; // search text, category ('' = all, '__none' = uncategorised), status filter, page
+  const rs = { q: '', s: 'all', p: 0 }; // search text (name or category), status filter, page
   const qty = {}; // product id -> text typed
   const entered = (p) => { const n = Number(qty[p.id]); return Number.isFinite(n) && n !== 0; };
   const inSearch = (p) => !norm(rs.q) || norm(p.nom + ' ' + (p.categorie || '')).includes(norm(rs.q));
-  const inCat = (p) => !rs.cat || (rs.cat === '__none' ? !p.categorie : p.categorie === rs.cat);
   const inStatus = (p, s) => s === 'all' || (s === 'low' ? stockState(p) !== 'ok' : entered(p));
-  const visible = () => prods.filter((p) => inSearch(p) && inCat(p) && inStatus(p, rs.s));
-  const catOpts = [{ v: '', l: 'Toutes les catégories' }, ...cats.map((c) => ({ v: c, l: c })), ...(cats.length && prods.some((p) => !p.categorie) ? [{ v: '__none', l: 'Sans catégorie' }] : [])];
+  const visible = () => prods.filter((p) => inSearch(p) && inStatus(p, rs.s));
 
   const count = () => {
     const n = prods.filter(entered).length;
-    $('#rscount').textContent = n ? `${n} produit${n > 1 ? 's' : ''} à mettre à jour` : 'Aucune quantité saisie';
+    $('#rscount').textContent = n ? `${n} produit${n > 1 ? 's' : ''} saisi${n > 1 ? 's' : ''}` : '';
   };
   const chips = () => {
     $('#rsflt').innerHTML = [['all', 'Tous'], ['low', 'À réapprovisionner'], ['typed', 'Saisis']]
-      .map(([k, l]) => `<button type="button" class="chip ${rs.s === k ? 'on' : ''}" data-s="${k}">${l} ${prods.filter((p) => inSearch(p) && inCat(p) && inStatus(p, k)).length}</button>`).join('');
+      .map(([k, l]) => `<button type="button" class="chip ${rs.s === k ? 'on' : ''}" data-s="${k}">${l} ${prods.filter((p) => inSearch(p) && inStatus(p, k)).length}</button>`).join('');
     $('#rsflt').querySelectorAll('[data-s]').forEach((b) => b.onclick = () => { rs.s = b.dataset.s; rs.p = 0; draw(); });
   };
   const draw = () => {
     const list = visible();
     rs.p = Math.min(rs.p, Math.max(0, Math.ceil(list.length / PER_RS) - 1));
-    $('#rslist').innerHTML = list.length ? `<table><tr><th>Produit</th><th>Stock actuel</th><th class="num">Quantité reçue</th></tr>${list.slice(rs.p * PER_RS, (rs.p + 1) * PER_RS).map((p) => `
+    $('#rslist').innerHTML = list.length ? `<table><tr><th>Produit</th><th>Stock actuel</th><th class="num">Quantité reçue (unités)</th></tr>${list.slice(rs.p * PER_RS, (rs.p + 1) * PER_RS).map((p) => `
       <tr><td><b>${esc(p.nom)}</b>${p.categorie ? `<span class="rs-cat">${esc(p.categorie)}</span>` : ''}</td>
       <td>${p.stock ? stockLabel(p) : '<span class="pill bad">Rupture</span>'}</td>
-      <td class="num"><span class="rs-in"><input type="number" step="1" data-q="${p.id}" value="${esc(qty[p.id] ?? '')}" placeholder="0"><span class="muted">unités</span></span></td></tr>`).join('')}</table>${pagerHtml(list.length, rs.p, PER_RS)}`
+      <td class="num"><span class="rs-in"><input type="number" step="1" data-q="${p.id}" value="${esc(qty[p.id] ?? '')}" placeholder="0"></span></td></tr>`).join('')}</table>${pagerHtml(list.length, rs.p, PER_RS)}`
       : '<div class="empty" style="padding:20px">Aucun produit ne correspond.</div>';
     $('#rslist').querySelectorAll('[data-pg]').forEach((b) => b.onclick = () => { rs.p = +b.dataset.pg; draw(); });
     chips(); count();
   };
 
   modal(`<h3>Réapprovisionner${help('Quantité reçue par produit, en unités. Un nombre négatif corrige le stock.')}</h3>
-    <div class="row rs-bar"><input class="search" id="rsq" placeholder="Nom ou catégorie" autocomplete="off">${cats.length ? dd('cat', catOpts, '') : ''}</div>
+    <div class="row rs-bar"><input class="search" id="rsq" placeholder="Nom ou catégorie" autocomplete="off"></div>
     <div class="row rs-flt" id="rsflt"></div>
     <div id="rslist"></div>
     <div class="row rs-foot"><span class="muted" id="rscount"></span><button class="btn alt" value="cancel" formnovalidate>Annuler</button><button class="btn" id="rssave">Enregistrer</button></div>`,
@@ -744,7 +753,6 @@ function restockDialog(prods) {
 
   $('#rsq').addEventListener('input', (e) => { rs.q = e.target.value; rs.p = 0; draw(); });
   $('#rsq').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#rslist [data-q]')?.focus(); } });
-  dlg.querySelector('[name=cat]')?.addEventListener('change', (e) => { rs.cat = e.target.value; rs.p = 0; draw(); });
   $('#rslist').addEventListener('input', (e) => { const i = e.target.closest('[data-q]'); if (i) { qty[i.dataset.q] = i.value; chips(); count(); } });
   $('#rslist').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || !e.target.matches('[data-q]')) return;
@@ -840,21 +848,25 @@ function go(p) {
 }
 // a sidebar click opens a page fresh (no stale filter/search/date); dashboard shortcuts call go() directly to keep their preset
 document.querySelectorAll('nav [data-p]').forEach((b) => b.onclick = () => { Object.values(pages).forEach((pg) => delete pg.state); go(b.dataset.p); });
+// F1 / F2 / F3 = the Comptoir pages, same as a sidebar click (labels on the buttons in index.html)
+document.addEventListener('keydown', (e) => { const p = { F1: 'checkin', F2: 'members', F3: 'shop' }[e.key]; if (!p) return; e.preventDefault(); if (!dlg.open) $(`nav [data-p="${p}"]`).click(); });
 async function backupDialog() {
   const [i, auto] = await Promise.all([api.backupInfo(), api.autostartInfo()]);
   const m = i.last?.match(/(\d{4})-(\d\d)-(\d\d)-(\d\d)(\d\d)/);
   modal(`<h3>Paramètres</h3>
     <label>Copie automatique${help('Une copie toutes les 2 heures et à chaque fermeture, 10 de chaque conservées. Idéal : une clé USB ou un autre disque.', 'sm')}</label>
-    <p style="margin:0 4px;word-break:break-all"><b>${esc(i.dir)}</b></p>
+    <p style="margin:0 4px"><b title="${esc(i.dir)}">${esc(i.dir.length > 46 ? i.dir.slice(0, 22) + '…' + i.dir.slice(-22) : i.dir)}</b></p>
     <p class="muted" style="margin:0 4px">Dernière copie : ${m ? `${m[3]}/${m[2]}/${m[1]} à ${m[4]}:${m[5]}` : 'aucune'}</p>
     <div class="row" style="margin-top:12px;justify-content:flex-start"><button type="button" class="btn alt sm" id="chdir">Changer le dossier</button></div>
-    <label style="margin-top:24px">Copie manuelle et restauration</label>
-    <div class="row" style="margin-top:8px;justify-content:flex-start"><button type="button" class="btn sm" id="now">Sauvegarder maintenant…</button><button type="button" class="btn alt sm" id="restore">Restaurer une sauvegarde…</button></div>
-    <label style="margin-top:24px">Démarrage</label>
-    ${auto.dispo ? `<label class="chk"><input type="checkbox" id="auto" ${auto.on ? 'checked' : ''}> Lancer l'application au démarrage de Windows</label>` : '<p class="muted" style="margin:0 4px">Disponible dans la version installée.</p>'}
+    <div class="row" style="margin-top:16px;justify-content:flex-start"><button type="button" class="btn sm" id="now">Sauvegarder maintenant…</button><button type="button" class="btn alt sm" id="restore">Restaurer une sauvegarde…</button></div>
+    <label style="margin-top:24px">Données</label>
+    <div class="row" style="margin-top:8px;justify-content:flex-start"><button type="button" class="btn alt sm" id="impm">Importer des membres…</button><button type="button" class="btn alt sm" id="impp">Importer des produits…</button></div>
+    ${auto.dispo ? `<label style="margin-top:24px">Démarrage</label><label class="chk"><input type="checkbox" id="auto" ${auto.on ? 'checked' : ''}> Lancer l'application au démarrage de Windows</label>` : ''}
     <label style="margin-top:24px">Fermeture de la salle${help("Salle fermée (travaux, fêtes…) : tous les abonnements en cours sont prolongés d'autant de jours.", 'sm')}</label>
     <div class="row" style="margin-top:8px;justify-content:flex-start"><input id="extj" type="number" min="1" max="365" step="1" value="7" style="width:110px" aria-label="Jours"><span class="muted">jours</span><button type="button" class="btn alt sm" id="ext">Prolonger…</button></div>
     `, async () => {});
+  $('#impm').onclick = () => { dlg.close(); importDialog('members'); };
+  $('#impp').onclick = () => { dlg.close(); importDialog('products'); };
   $('#extj').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#ext').click(); } }; // the dialog form would otherwise just close
   $('#ext').onclick = guard(async () => {
     const j = Math.round(Number($('#extj').value));

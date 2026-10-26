@@ -16,6 +16,7 @@ nav { width: 248px; flex: none; padding: 24px 18px; border-right: 1px solid var(
 nav button { all: unset; cursor: pointer; padding: 12px 18px; border-radius: 9999px; font-weight: 500; display: flex; justify-content: space-between; align-items: center; }
 nav button:hover { background: var(--cloud); }
 nav button.on { background: var(--ink); color: #fff; }
+nav button kbd { font: 500 11px var(--text); color: var(--stone); } /* F1 / F2 / F3 shortcut of the Comptoir pages */
 nav .sp { flex: 1; }
 nav .grp { font-size: 12px; font-weight: 500; letter-spacing: .8px; text-transform: uppercase; color: var(--mute); padding: 18px 18px 4px; }
 nav .logo + .grp { padding-top: 0; }
@@ -70,13 +71,19 @@ label { display: block; font-size: 14px; font-weight: 500; margin: 14px 0 6px 4p
 .card.dark .k { color: var(--stone); }
 .card .v { font: 500 56px/1 var(--display); margin-top: 12px; }
 .card .v small { font: 500 18px var(--text); margin-left: 4px; }
+.card.low { margin-top: 16px; padding: 18px 24px; } /* dashboard: products out of stock or nearly, hidden when none */
+.card.low .names { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 8px; font-weight: 500; }
+.card.low .names > span { display: inline-flex; align-items: center; gap: 6px; }
 
 /* table */
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; font-size: 14px; font-weight: 500; color: var(--mute); padding: 10px 12px; border-bottom: 1px solid var(--hairline-soft); }
 td { padding: 10px 12px; border-bottom: 1px solid var(--hairline-soft); vertical-align: middle; }
 tr:hover td { background: #fafafa; }
+tr[data-row] { cursor: pointer; } /* the row opens the member / product / formule */
+#today .chip { opacity: 0; } #today tr:hover .chip, #today .chip:focus-visible { opacity: 1; } /* « Annuler » only when the row is hovered */
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.sort { cursor: pointer; user-select: none; } th.sort:hover, th.sort.on { color: var(--ink); } /* Membres: click Nom / Fin to sort */
 td { white-space: nowrap; }
 td.acts { text-align: right; }
 td.wrap { white-space: normal; max-width: 220px; }
@@ -211,7 +218,6 @@ main.fill { display: flex; flex-direction: column; overflow: hidden; padding-bot
 dialog.wide { width: 880px; }
 dialog .row.rs-bar { margin-top: 16px; justify-content: flex-start; flex-wrap: nowrap; }
 dialog .row.rs-bar .search { flex: 1; max-width: none; }
-dialog .row.rs-bar .dd { width: 250px; flex: none; }
 dialog .row.rs-flt { margin-top: 12px; gap: 8px; justify-content: flex-start; }
 #rslist { margin-top: 8px; min-height: 380px; max-height: calc(100vh - 340px); overflow-y: auto; }
 #rslist td { padding: 6px 12px; }
@@ -240,7 +246,6 @@ dialog .row.rs-foot span { margin-right: auto; }
 
 /* labelled filter rows (Produits) */
 .frow { display: flex; align-items: center; gap: 16px; margin-bottom: 10px; }
-.flab { flex: none; width: 76px; font-size: 13px; font-weight: 500; color: var(--mute); }
 
 /* print (caisse) */
 .printonly { display: none; }
